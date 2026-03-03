@@ -1,0 +1,17 @@
+# Core
+redis[hiredis]>=5.0.3
+python-dotenv>=1.0.0
+pyyaml>=6.0.1
+click>=8.1.7
+
+# Embedding - OpenAI (default)
+openai>=1.30.0
+
+# Embedding - Azure OpenAI uses the same openai package
+
+# Embedding - Sentence Transformers (optional local model)
+# sentence-transformers>=3.0.0
+
+# Dev / testing
+pytest>=8.2.0
+pytest-mock>=3.14.0
