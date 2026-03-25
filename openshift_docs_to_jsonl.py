@@ -66,8 +66,17 @@ import yaml
 REPO_URL        = "https://github.com/openshift/openshift-docs.git"
 SITE_BASE       = "https://docs.openshift.com"
 DISTRO_MAP_FILE = "_distro_map.yml"
-TOPIC_MAP_FILE  = "_topic_map.yml"
 TARGET_DISTRO   = "openshift-enterprise"
+
+# Topic map filenames vary by branch — discovered at runtime (see find_topic_maps)
+_TOPIC_MAP_PATTERNS = [
+    "_topic_map.yml",
+    "_topic_map.yaml",
+    "_topic_map_*.yml",
+    "_topic_map_*.yaml",
+    "_topic_maps/*.yml",
+    "_topic_maps/*.yaml",
+]
 
 USECASE_ID          = "GENAI1597_SSOP"
 AGENT_FILTER        = "ssop_cloud_operations_knowledge_agent"
@@ -132,36 +141,79 @@ def load_distro_map(repo_dir: str, branch: str) -> str:
 # Topic map -> {stem: {page_url, page_name, dir}}
 # ─────────────────────────────────────────────────────────────
 
+def find_topic_maps(repo_dir: str) -> list:
+    """
+    Discover topic map file(s) in the repo root.
+
+    Branches handle this differently:
+      - Older branches:  single  _topic_map.yml
+      - Newer branches:  split   _topic_map_<distro>.yml  (one per distro)
+                      or subdir  _topic_maps/<distro>.yml
+
+    Returns a list of absolute paths for all matches, or raises FileNotFoundError
+    with a helpful message if nothing is found.
+    """
+    import glob as _glob
+    candidates = []
+    for pattern in _TOPIC_MAP_PATTERNS:
+        found = sorted(_glob.glob(os.path.join(repo_dir, pattern)))
+        for f in found:
+            if f not in candidates:
+                candidates.append(f)
+
+    if not candidates:
+        checked = "\n  ".join(
+            os.path.join(repo_dir, p) for p in _TOPIC_MAP_PATTERNS
+        )
+        raise FileNotFoundError(
+            f"No topic map file found in: {repo_dir}\n"
+            f"Looked for:\n  {checked}\n"
+            f"Make sure --repo-dir points to the root of the cloned "
+            f"openshift/openshift-docs repository."
+        )
+
+    return candidates
+
+
 def load_topic_map(repo_dir: str, base_url: str) -> dict:
-    path = os.path.join(repo_dir, TOPIC_MAP_FILE)
-    with open(path) as f:
-        docs = list(yaml.safe_load_all(f))
+    """
+    Parse all topic map file(s) found in the repo.
+    Returns dict: file stem -> {page_url, page_name, dir}
+    """
+    topic_map_files = find_topic_maps(repo_dir)
+    print(f"[parse] Topic map file(s) found:")
+    for f in topic_map_files:
+        print(f"          {f}")
 
     url_map = {}
 
-    def walk(topics, current_dir):
-        for topic in topics:
-            if not isinstance(topic, dict):
-                continue
-            distros = topic.get("Distros", "")
-            if distros and TARGET_DISTRO not in distros:
-                continue
-            dir_part = topic.get("Dir", current_dir)
-            if "File" in topic:
-                stem = topic["File"]
-                page_name = topic.get("Name", stem)
-                path_part = f"{dir_part}/{stem}" if dir_part else stem
-                url_map[stem] = {
-                    "page_url":  f"{base_url}/{path_part}.html",
-                    "page_name": page_name,
-                    "dir":       dir_part,
-                }
-            if "Topics" in topic:
-                walk(topic["Topics"], dir_part)
+    for topic_map_path in topic_map_files:
+        with open(topic_map_path) as f:
+            docs = list(yaml.safe_load_all(f))
 
-    for section in docs:
-        if isinstance(section, dict) and "Topics" in section:
-            walk(section["Topics"], section.get("Dir", ""))
+        def walk(topics, current_dir):
+            for topic in topics:
+                if not isinstance(topic, dict):
+                    continue
+                distros = topic.get("Distros", "")
+                if distros and TARGET_DISTRO not in distros:
+                    continue
+                dir_part = topic.get("Dir", current_dir)
+                if "File" in topic:
+                    stem = topic["File"]
+                    page_name = topic.get("Name", stem)
+                    path_part = f"{dir_part}/{stem}" if dir_part else stem
+                    url_map[stem] = {
+                        "page_url":  f"{base_url}/{path_part}.html",
+                        "page_name": page_name,
+                        "dir":       dir_part,
+                    }
+                if "Topics" in topic:
+                    walk(topic["Topics"], dir_part)
+
+        for section in docs:
+            if isinstance(section, dict) and "Topics" in section:
+                walk(section["Topics"], section.get("Dir", ""))
 
     return url_map
 
