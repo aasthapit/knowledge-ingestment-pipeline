@@ -21,7 +21,9 @@ import logging
 import uuid
 from pathlib import Path
 
-from pipeline import chunker, embedder, exporter, redis_store, tagger, mongo_store
+from pipeline import chunker, embedder, exporter, tagger, mongo_store
+# redis_store is imported lazily inside functions that need it so that the
+# Redis Search module is not required when only using the MongoDB / JSONL path.
 from pipeline.config import settings
 
 logger = logging.getLogger(__name__)
@@ -72,6 +74,7 @@ def ingest_file(
         logger.info("JSONL saved: %s", out)
 
     if not skip_redis:
+        from pipeline import redis_store
         redis_store.create_index()
         redis_store.upsert_chunks(chunks, vectors)
 
@@ -120,6 +123,7 @@ def ingest_directory(
         if export_jsonl:
             exporter.export_jsonl(all_chunks, embeddings=all_vectors)
         if not skip_redis:
+            from pipeline import redis_store
             redis_store.create_index()
             redis_store.upsert_chunks(all_chunks, all_vectors)
 
@@ -350,6 +354,7 @@ def query_vectorstore(
             r["normalized_score"] = round(max(0.0, float(r.get("score", 0))), 4)
     else:
         # Redis cosine distance: 0 = identical, ~[0,2] range
+        from pipeline import redis_store
         redis_tag_filter = None
         if tag_filter:
             redis_tag_filter = "@tags:{" + "|".join(tag_filter) + "}"
@@ -387,6 +392,7 @@ def query(
     tag_filter: Optional RediSearch tag filter, e.g. ``"@tags:{python}"``.
     """
     settings.validate()
+    from pipeline import redis_store
     vectors = embedder.embed_texts([question])
     results = redis_store.search(vectors[0], top_k=top_k, tag_filter=tag_filter)
     return results

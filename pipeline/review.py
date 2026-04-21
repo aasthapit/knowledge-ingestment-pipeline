@@ -20,8 +20,8 @@ import time
 import uuid
 from typing import Any
 
-from pipeline import embedder, redis_store
-from pipeline import mongo_store
+from pipeline import embedder, mongo_store
+# redis_store imported lazily so Redis Search module is not required at import time
 from pipeline.config import settings
 
 logger = logging.getLogger(__name__)
@@ -207,6 +207,7 @@ def push_approved(
                 from pipeline import qdrant_store
                 qdrant_store.upsert_chunks(chunks, vectors, quality_scores=quality_scores)
             else:  # redis (default)
+                from pipeline import redis_store
                 redis_store.create_index()
                 redis_store.upsert_chunks(chunks, vectors)
 
