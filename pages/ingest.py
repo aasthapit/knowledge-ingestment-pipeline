@@ -135,6 +135,14 @@ with tab_jsonl:
                 icon="ℹ️",
             )
 
+        jsonl_kb_name = st.text_input(
+            "Knowledge base name",
+            value="default",
+            placeholder="e.g. openshift-4.18, internal-docs",
+            help="Logical name used for ledger grouping and drift tracking.",
+            key="jsonl_kb_name",
+        )
+
         if st.button("📦  Import JSONL", type="primary", use_container_width=True, key="jsonl_submit"):
             import io as _io
             jsonl_file.seek(0)
@@ -156,6 +164,7 @@ with tab_jsonl:
                     batch_name=jsonl_file.name,
                     extra_tags=jsonl_tags,
                     progress_cb=_progress,
+                    kb_name=jsonl_kb_name.strip() or "default",
                 )
                 progress_bar.progress(1.0, text="Done!")
                 st.session_state["last_jsonl_import"] = result
@@ -194,13 +203,22 @@ with tab_jsonl:
 if jsonl_file:
     st.stop()
 
-# ── Tags ──────────────────────────────────────────────────────────────────────
+# ── Tags / KB name ────────────────────────────────────────────────────────────
 st.divider()
-tags_raw = st.text_input(
-    "Tags  *(optional)*",
-    placeholder="finance, q1-2024, internal",
-    help="Comma-separated keywords that describe this document. These will appear in search results.",
-)
+col_tags, col_kb = st.columns([3, 1])
+with col_tags:
+    tags_raw = st.text_input(
+        "Tags  *(optional)*",
+        placeholder="finance, q1-2024, internal",
+        help="Comma-separated keywords that describe this document. These will appear in search results.",
+    )
+with col_kb:
+    kb_name = st.text_input(
+        "Knowledge base",
+        value="default",
+        placeholder="default",
+        help="Logical knowledge base name for grouping and drift tracking.",
+    )
 tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
 if tags:
     st.caption("Will be tagged: " + "  ".join(f"`{t}`" for t in tags))
@@ -256,6 +274,7 @@ if st.button(
                 extra_tags=tags,
                 quality_threshold=quality_threshold,
                 auto_push=auto_push,
+                kb_name=kb_name.strip() or "default",
             )
 
             if result["quality_passed"]:

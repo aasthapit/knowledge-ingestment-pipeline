@@ -61,6 +61,10 @@ class Settings:
     # Max tokens per chunk when using HybridChunker
     docling_max_tokens: int = int(os.getenv("DOCLING_MAX_TOKENS", "512"))
 
+    # ── MongoDB (staging store + KB ledger) ───────────────────────────────
+    mongodb_url: str = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
+    mongodb_db_name: str = os.getenv("MONGODB_DB_NAME", "knowledge_pipeline")
+
     def validate(self) -> None:
         """Raise ValueError for obviously missing required settings."""
         if self.embedding_provider == "openai" and not self.openai_api_key:

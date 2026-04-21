@@ -23,4 +23,6 @@ dependencies = [
     "rich>=13.7.0",
     # UI
     "streamlit>=1.40.0",
+    # Document ledger / staging
+    "pymongo>=4.10.0",
 ]

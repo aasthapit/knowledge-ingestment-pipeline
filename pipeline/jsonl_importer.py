@@ -228,11 +228,12 @@ def import_jsonl(
     batch_name: str | None = None,
     extra_tags: list[str] | None = None,
     progress_cb: Callable[[int, int], None] | None = None,
+    kb_name: str = "default",
 ) -> dict[str, Any]:
     """
     Parse an entire JSONL file and stage all chunks as a single import batch.
 
-    The batch is stored as one entry in :class:`~pipeline.redis_store.StagingStore`
+    The batch is stored as one entry in :class:`~pipeline.mongo_store.MongoStagingStore`
     with ``status="approved"`` (JSONL imports are treated as pre-vetted data).
 
     Parameters
@@ -248,6 +249,8 @@ def import_jsonl(
         Optional ``progress_cb(done: int, total: int)`` called after each
         1 000-chunk batch to allow UI progress updates.
         ``total`` is ``-1`` when the file size is unknown.
+    kb_name:
+        Logical knowledge base name for ledger grouping and drift tracking.
 
     Returns
     -------
@@ -255,7 +258,7 @@ def import_jsonl(
         ``{doc_id, batch_name, schema, total_chunks, unique_sources,
            has_embeddings, has_partial_embeddings}``
     """
-    from pipeline import redis_store
+    from pipeline import mongo_store
 
     extra_tags = extra_tags or []
     chunks_dicts: list[dict] = []
@@ -339,6 +342,7 @@ def import_jsonl(
         "quality_passed":         1,
         "quality_flags":          "[]",
         "status":                 "approved",
+        "kb_name":                kb_name,
     }
 
     # If all embeddings are pre-computed, attach them into the chunk dicts
@@ -348,7 +352,7 @@ def import_jsonl(
             if emb:
                 cd["_embedding"] = emb
 
-    staging = redis_store.get_staging()
+    staging = mongo_store.get_staging()
     staging.enqueue(doc_id, meta, chunks_dicts)
     staging.approve(doc_id)
 

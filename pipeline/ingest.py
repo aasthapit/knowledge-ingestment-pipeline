@@ -21,7 +21,7 @@ import logging
 import uuid
 from pathlib import Path
 
-from pipeline import chunker, embedder, exporter, redis_store, tagger
+from pipeline import chunker, embedder, exporter, redis_store, tagger, mongo_store
 from pipeline.config import settings
 
 logger = logging.getLogger(__name__)
@@ -135,6 +135,7 @@ def ingest_document(
     extra_tags: list[str] | None = None,
     quality_threshold: float | None = None,
     auto_push: bool = False,
+    kb_name: str = "default",
 ) -> dict:
     """
     Ingest any supported document format through the full pipeline.
@@ -162,6 +163,9 @@ def ingest_document(
     auto_push:
         If True, auto-approved documents are embedded and pushed immediately
         without waiting for an explicit ``review push`` command.
+    kb_name:
+        Logical knowledge base name for ledger grouping and drift tracking.
+        Defaults to ``"default"``.
 
     Returns
     -------
@@ -219,9 +223,10 @@ def ingest_document(
         "suggested_tags":   json.dumps(tags),
         "chunk_count":      len(chunks),
         "status":           status,
+        "kb_name":          kb_name,
     }
 
-    staging = redis_store.get_staging()
+    staging = mongo_store.get_staging()
     staging.enqueue(doc_id, meta, [c.to_dict() for c in chunks])
 
     if result.passed:
@@ -241,6 +246,7 @@ def ingest_document(
     if auto_push and result.passed:
         push_result = push_approved(doc_id=doc_id)
         logger.info("Auto-pushed: %s", push_result)
+
 
     return {
         "doc_id":          doc_id,
@@ -263,6 +269,7 @@ def ingest_jsonl(
     batch_name: str | None = None,
     extra_tags: list[str] | None = None,
     progress_cb=None,
+    kb_name: str = "default",
 ) -> dict:
     """
     Import a JSONL chunk file into the staging area.
@@ -284,6 +291,8 @@ def ingest_jsonl(
         Additional tags applied to every chunk.
     progress_cb:
         Optional ``progress_cb(done: int, total: int)`` for progress updates.
+    kb_name:
+        Logical knowledge base name for ledger grouping and drift tracking.
 
     Returns
     -------
@@ -298,6 +307,7 @@ def ingest_jsonl(
         batch_name=batch_name,
         extra_tags=extra_tags,
         progress_cb=progress_cb,
+        kb_name=kb_name,
     )
 
 

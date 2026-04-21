@@ -21,6 +21,7 @@ import uuid
 from typing import Any
 
 from pipeline import embedder, redis_store
+from pipeline import mongo_store
 from pipeline.config import settings
 
 logger = logging.getLogger(__name__)
@@ -30,8 +31,8 @@ logger = logging.getLogger(__name__)
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _staging() -> redis_store.StagingStore:
-    return redis_store.get_staging()
+def _staging() -> mongo_store.MongoStagingStore:
+    return mongo_store.get_staging()
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +212,23 @@ def push_approved(
 
             pushed_docs += 1
             pushed_chunks += len(chunks)
+
+            # Record push in the KB ledger for drift tracking
+            try:
+                ledger = mongo_store.get_ledger()
+                ledger.record_push(
+                    doc_id=did,
+                    title=doc_meta.get("title", ""),
+                    source_path=doc_meta.get("source_path", ""),
+                    source_type=doc_meta.get("source_type", ""),
+                    url=doc_meta.get("url") or None,
+                    chunk_ids=[c.chunk_id for c in chunks],
+                    tags=doc_meta.get("suggested_tags") or [],
+                    quality_score=qs_value,
+                    kb_name=doc_meta.get("kb_name", "default"),
+                )
+            except Exception as ledger_exc:
+                logger.warning("Could not record push to ledger: %s", ledger_exc)
 
             if remove_after_push:
                 staging.remove_doc(did)

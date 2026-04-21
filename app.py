@@ -23,6 +23,7 @@ pg = st.navigation(
         ],
         "Knowledge Base": [
             st.Page("pages/search.py",  title="Search",       icon="🔎"),
+            st.Page("pages/drift.py",   title="KB Health",    icon="🔍"),
             st.Page("pages/status.py",  title="Status",       icon="⚙️"),
         ],
     }
