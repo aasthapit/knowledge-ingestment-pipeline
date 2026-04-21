@@ -163,7 +163,9 @@ def push_approved(
                 continue
 
             # Reconstruct Chunk objects
+            # JSONL imports may have pre-computed embeddings stored in _embedding
             chunks: list[Chunk] = []
+            precomputed: list[list[float] | None] = []
             for cd in chunk_dicts:
                 c = Chunk(
                     chunk_id=cd.get("chunk_id", str(uuid.uuid4())),
@@ -175,10 +177,20 @@ def push_approved(
                     metadata=cd.get("metadata", {}),
                 )
                 chunks.append(c)
+                precomputed.append(cd.get("_embedding"))  # None if not present
 
-            # Embed
-            logger.info("Embedding %d chunks for doc %s …", len(chunks), did)
-            vectors = embedder.embed_chunks(chunks)
+            # Embed only chunks that don't already have a vector
+            needs_embed = [i for i, v in enumerate(precomputed) if v is None]
+            if needs_embed:
+                logger.info("Embedding %d/%d chunks for doc %s …", len(needs_embed), len(chunks), did)
+                sub_chunks = [chunks[i] for i in needs_embed]
+                sub_vectors = embedder.embed_chunks(sub_chunks)
+                for idx, vec in zip(needs_embed, sub_vectors):
+                    precomputed[idx] = vec
+            else:
+                logger.info("Reusing %d pre-computed embeddings for doc %s.", len(chunks), did)
+
+            vectors = [v for v in precomputed]   # type: ignore[assignment]
 
             # Quality score for this doc (stored in staging meta)
             doc_meta = staging.get_doc_meta(did) or {}

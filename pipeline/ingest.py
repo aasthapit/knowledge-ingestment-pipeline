@@ -255,6 +255,53 @@ def ingest_document(
 
 
 # ---------------------------------------------------------------------------
+# JSONL import path
+# ---------------------------------------------------------------------------
+
+def ingest_jsonl(
+    source,
+    batch_name: str | None = None,
+    extra_tags: list[str] | None = None,
+    progress_cb=None,
+) -> dict:
+    """
+    Import a JSONL chunk file into the staging area.
+
+    Supports both the crawler schema (``text`` + ``page_url``) and the
+    pipeline exporter schema (``content`` + ``source``).  Auto-detects
+    which schema is in use from the first record.
+
+    Pre-computed embeddings in pipeline-schema files are reused automatically
+    so you don't pay for re-embedding.
+
+    Parameters
+    ----------
+    source:
+        File path, URL string, or file-like object (e.g. Streamlit BytesIO).
+    batch_name:
+        Human-readable label for this import batch.
+    extra_tags:
+        Additional tags applied to every chunk.
+    progress_cb:
+        Optional ``progress_cb(done: int, total: int)`` for progress updates.
+
+    Returns
+    -------
+    dict
+        ``{doc_id, batch_name, schema, total_chunks, unique_sources,
+           has_embeddings, has_partial_embeddings}``
+    """
+    from pipeline.jsonl_importer import import_jsonl as _import
+
+    return _import(
+        source=source,
+        batch_name=batch_name,
+        extra_tags=extra_tags,
+        progress_cb=progress_cb,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Legacy path — Markdown only, direct to Redis, no staging/review
 # ---------------------------------------------------------------------------
 

@@ -68,6 +68,53 @@ def ingest_group() -> None:
     """Ingest documents into the pipeline."""
 
 
+@ingest_group.command("jsonl")
+@click.argument("path", type=click.Path(exists=True))
+@click.option("--tags", "-t", multiple=True, help="Extra tags applied to every chunk.")
+@click.option("--name", "-n", default=None, help="Batch name (defaults to filename).")
+def ingest_jsonl_cmd(path: str, tags: tuple[str, ...], name: str | None) -> None:
+    """
+    Bulk-import a JSONL chunk file into the staging area.
+
+    Supports both the crawler schema (text + page_url) and the pipeline
+    export schema (content + source).  Pre-computed embeddings are reused
+    automatically when present.
+
+    After import, run 'review push' to embed (if needed) and push to the
+    vector store.
+    """
+    from pipeline.ingest import ingest_jsonl
+
+    total_seen = 0
+
+    def _progress(done: int, total: int) -> None:
+        nonlocal total_seen
+        if done != total_seen:
+            total_seen = done
+            click.echo(f"  Parsed {done:,} chunks…", nl=False)
+            click.echo("\r", nl=False)
+
+    result = ingest_jsonl(
+        source=path,
+        batch_name=name,
+        extra_tags=list(tags),
+        progress_cb=_progress,
+    )
+
+    click.echo()
+    click.echo(
+        f"Done. {result['total_chunks']:,} chunks from {result['unique_sources']:,} "
+        f"source(s) staged ({result['schema']} schema)."
+    )
+    embed_note = (
+        "Pre-computed embeddings reused — run 'review push' to index."
+        if result["has_embeddings"] else
+        "No embeddings in file — run 'review push' to embed and index."
+    )
+    click.echo(embed_note)
+    click.echo(f"Batch ID: {result['doc_id']}")
+
+
 @ingest_group.command("doc")
 @click.argument("source")
 @click.option("--tags", "-t", multiple=True, help="Extra tags to attach to all chunks.")

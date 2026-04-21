@@ -41,15 +41,16 @@ def _relevance_label(score: float) -> tuple[str, str]:
 
 st.title("➕ Add a Document")
 st.caption(
-    "Upload a file or paste a web address. "
+    "Upload a file, paste a web address, or import a JSONL bulk export. "
     "The system will read it, check its quality, and queue it for the knowledge base."
 )
 
 # ── Source input ──────────────────────────────────────────────────────────────
-tab_file, tab_url = st.tabs(["📄 Upload a File", "🔗 From a Web Address"])
+tab_file, tab_url, tab_jsonl = st.tabs(["📄 Upload a File", "🔗 From a Web Address", "📦 Bulk JSONL Import"])
 
 uploaded_file = None
 url_input = ""
+jsonl_file = None
 
 with tab_file:
     uploaded_file = st.file_uploader(
@@ -70,6 +71,128 @@ with tab_url:
     )
     if url_input:
         st.caption(f"🔗 {url_input}")
+
+with tab_jsonl:
+    st.markdown(
+        "Import a bulk JSONL file — for example, a dataset previously exported from "
+        "this pipeline or crawled with `crawl_ocp_docs.py`."
+    )
+    jsonl_file = st.file_uploader(
+        "Choose a .jsonl file",
+        type=["jsonl"],
+        help="Each line must be a valid JSON object. Supports the crawler schema (text + page_url) and the pipeline export schema (content + source).",
+        label_visibility="collapsed",
+        key="jsonl_uploader",
+    )
+
+    if jsonl_file:
+        # ── Preview ──────────────────────────────────────────────────────────
+        try:
+            from pipeline.jsonl_importer import peek_jsonl
+            preview = peek_jsonl(jsonl_file, n=5)
+
+            schema_label = {
+                "crawler":  "Crawler format  (page_url · text · section_breadcrumbs)",
+                "pipeline": "Pipeline export format  (source · content · section · tags)",
+                "unknown":  "Unknown / custom schema",
+            }.get(preview["schema"], preview["schema"])
+
+            col_a, col_b, col_c = st.columns(3)
+            col_a.metric("Schema detected", preview["schema"].title())
+            col_b.metric("Unique sources (preview)", preview["unique_sources"])
+            col_c.metric("Pre-computed embeddings", "Yes" if preview["has_embeddings"] else "No",
+                         help="If Yes, the file already contains embedding vectors — no API calls needed to push.")
+            st.caption(schema_label)
+
+            with st.expander("Preview first 5 records"):
+                for i, chunk in enumerate(preview["sample_chunks"], 1):
+                    st.markdown(f"**{i}.** *{chunk.section or chunk.title}*")
+                    st.text(chunk.content[:300] + ("…" if len(chunk.content) > 300 else ""))
+                    if i < len(preview["sample_chunks"]):
+                        st.divider()
+
+        except Exception as exc:
+            st.warning(f"Could not preview file: {exc}")
+            preview = None
+
+        st.divider()
+
+        # ── JSONL-specific controls ───────────────────────────────────────────
+        jsonl_tags_raw = st.text_input(
+            "Extra tags  *(optional)*",
+            placeholder="openshift, internal, 4.18",
+            help="Comma-separated tags applied to every chunk in this import.",
+            key="jsonl_tags",
+        )
+        jsonl_tags = [t.strip() for t in jsonl_tags_raw.split(",") if t.strip()]
+
+        if not preview or not preview.get("has_embeddings"):
+            st.info(
+                "⚡ This file has no pre-computed embeddings. "
+                "Clicking **Import** will stage the chunks; "
+                "you'll embed and push them from the Review Queue. "
+                "For a 20 000-chunk file this takes a few minutes and uses your OpenAI API.",
+                icon="ℹ️",
+            )
+
+        if st.button("📦  Import JSONL", type="primary", use_container_width=True, key="jsonl_submit"):
+            import io as _io
+            jsonl_file.seek(0)
+            file_bytes = _io.BytesIO(jsonl_file.read())
+            file_bytes.name = jsonl_file.name
+
+            progress_bar = st.progress(0.0, text="Parsing…")
+
+            def _progress(done: int, total: int) -> None:
+                if total and total > 0:
+                    progress_bar.progress(done / total, text=f"Parsed {done:,} of {total:,} chunks…")
+                else:
+                    progress_bar.progress(min(done / 25000, 0.99), text=f"Parsed {done:,} chunks…")
+
+            try:
+                from pipeline.ingest import ingest_jsonl
+                result = ingest_jsonl(
+                    source=file_bytes,
+                    batch_name=jsonl_file.name,
+                    extra_tags=jsonl_tags,
+                    progress_cb=_progress,
+                )
+                progress_bar.progress(1.0, text="Done!")
+                st.session_state["last_jsonl_import"] = result
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Import failed: {exc}")
+
+    # ── JSONL result card ─────────────────────────────────────────────────────
+    if "last_jsonl_import" in st.session_state:
+        r = st.session_state["last_jsonl_import"]
+        st.success(
+            f"**{r['batch_name']}** imported successfully — "
+            f"**{r['total_chunks']:,}** sections from **{r['unique_sources']:,}** source{'s' if r['unique_sources'] != 1 else ''}."
+        )
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Sections imported", f"{r['total_chunks']:,}")
+        m2.metric("Unique sources",    f"{r['unique_sources']:,}")
+        m3.metric("Schema",            r["schema"].title())
+
+        embed_note = ""
+        if r.get("has_embeddings"):
+            embed_note = "✅ Pre-computed embeddings reused — ready to push immediately."
+        elif r.get("has_partial_embeddings"):
+            embed_note = "⚠️ Partial embeddings — missing vectors will be computed on push."
+        else:
+            embed_note = "ℹ️ No embeddings — sections will be embedded when you push from the Review Queue."
+        st.info(embed_note)
+        st.info(f"Go to **Review Queue** → **Push to Knowledge Base** to make these sections searchable.\n\nBatch ID: `{r['doc_id']}`")
+
+        if st.button("Clear result", key="clear_jsonl"):
+            del st.session_state["last_jsonl_import"]
+            st.rerun()
+
+# ── Tags / Advanced / Submit — only for File and URL tabs ────────────────────
+# (JSONL tab has its own self-contained flow above)
+if jsonl_file:
+    st.stop()
 
 # ── Tags ──────────────────────────────────────────────────────────────────────
 st.divider()
