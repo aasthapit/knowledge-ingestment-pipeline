@@ -47,11 +47,14 @@ def _get_client() -> MongoClient:
             "host": settings.mongodb_host,
             "port": settings.mongodb_port,
             "serverSelectionTimeoutMS": 5000,
+            "tls": settings.mongodb_tls,
         }
         if settings.mongodb_username:
             kwargs["username"] = settings.mongodb_username
         if settings.mongodb_password:
             kwargs["password"] = settings.mongodb_password
+        if settings.mongodb_auth_source:
+            kwargs["authSource"] = settings.mongodb_auth_source
         _client = MongoClient(**kwargs)
     return _client
 

@@ -62,11 +62,13 @@ class Settings:
     docling_max_tokens: int = int(os.getenv("DOCLING_MAX_TOKENS", "512"))
 
     # ── MongoDB (staging store + KB ledger) ───────────────────────────────
-    mongodb_host: str     = os.getenv("MONGODB_HOST", "localhost")
-    mongodb_port: int     = int(os.getenv("MONGODB_PORT", "27017"))
-    mongodb_username: str = os.getenv("MONGODB_USERNAME", "")
-    mongodb_password: str = os.getenv("MONGODB_PASSWORD", "")
-    mongodb_db_name: str  = os.getenv("MONGODB_DB_NAME", "knowledge_pipeline")
+    mongodb_host: str        = os.getenv("MONGODB_HOST", "localhost")
+    mongodb_port: int        = int(os.getenv("MONGODB_PORT", "27017"))
+    mongodb_username: str    = os.getenv("MONGODB_USERNAME", "")
+    mongodb_password: str    = os.getenv("MONGODB_PASSWORD", "")
+    mongodb_auth_source: str = os.getenv("MONGODB_AUTH_SOURCE", "")
+    mongodb_tls: bool        = os.getenv("MONGODB_TLS", "true").lower() not in ("0", "false", "no")
+    mongodb_db_name: str     = os.getenv("MONGODB_DB_NAME", "knowledge_pipeline")
     # Prefix applied to every collection name — useful when sharing one DB
     # across multiple environments (e.g. "prod_" → prod_staging_docs).
     mongodb_collection_prefix: str = os.getenv("MONGODB_COLLECTION_PREFIX", "")
