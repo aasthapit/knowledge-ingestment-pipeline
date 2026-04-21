@@ -43,12 +43,27 @@ _client: MongoClient | None = None
 def _get_client() -> MongoClient:
     global _client
     if _client is None:
-        _client = MongoClient(settings.mongodb_url, serverSelectionTimeoutMS=5000)
+        kwargs: dict[str, Any] = {
+            "host": settings.mongodb_host,
+            "port": settings.mongodb_port,
+            "serverSelectionTimeoutMS": 5000,
+        }
+        if settings.mongodb_username:
+            kwargs["username"] = settings.mongodb_username
+        if settings.mongodb_password:
+            kwargs["password"] = settings.mongodb_password
+        _client = MongoClient(**kwargs)
     return _client
 
 
 def _get_db() -> Database:
     return _get_client()[settings.mongodb_db_name]
+
+
+def _coll_name(base: str) -> str:
+    """Apply the configured collection prefix to a base name."""
+    prefix = settings.mongodb_collection_prefix
+    return f"{prefix}{base}" if prefix else base
 
 
 # ---------------------------------------------------------------------------
@@ -66,14 +81,10 @@ class MongoStagingStore:
     Status values: ``pending_review``, ``approved``, ``rejected``, ``pushed``
     """
 
-    # Collection names
-    _DOCS  = "staging_docs"
-    _CHUNKS = "staging_chunks"
-
     def __init__(self, db: Database | None = None) -> None:
         self._db = db or _get_db()
-        self._docs: Collection  = self._db[self._DOCS]
-        self._chunks: Collection = self._db[self._CHUNKS]
+        self._docs: Collection   = self._db[_coll_name("staging_docs")]
+        self._chunks: Collection = self._db[_coll_name("staging_chunks")]
         self._ensure_indexes()
 
     def _ensure_indexes(self) -> None:
@@ -286,11 +297,9 @@ class KBLedger:
     - ``unknown``  — cannot determine (URL sources, missing fields)
     """
 
-    _COLL = "kb_documents"
-
     def __init__(self, db: Database | None = None) -> None:
         self._db = db or _get_db()
-        self._coll: Collection = self._db[self._COLL]
+        self._coll: Collection = self._db[_coll_name("kb_documents")]
         self._ensure_indexes()
 
     def _ensure_indexes(self) -> None:
