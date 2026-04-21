@@ -18,8 +18,9 @@ pg = st.navigation(
             st.Page("pages/home.py",    title="Dashboard",    icon="🏠", default=True),
         ],
         "Documents": [
-            st.Page("pages/ingest.py",  title="Add Document", icon="➕"),
-            st.Page("pages/review.py",  title="Review Queue", icon="📋"),
+            st.Page("pages/ingest.py",      title="Add Document", icon="➕"),
+            st.Page("pages/confluence.py",  title="Confluence",   icon="🔗"),
+            st.Page("pages/review.py",      title="Review Queue", icon="📋"),
         ],
         "Knowledge Base": [
             st.Page("pages/search.py",  title="Search",       icon="🔎"),

@@ -2,21 +2,21 @@
 jsonl_importer.py
 Imports pre-existing JSONL chunk files into the pipeline staging area.
 
-Two schemas are auto-detected:
+Two built-in schemas are auto-detected:
 
   "crawler"
       Produced by crawl_ocp_docs.py.
       Key fields: text, page_url, page_name, section_breadcrumbs (list),
                   section_heading, chunk_id, agent_filter, usecase_id.
-      No embeddings — must be embedded on push.
 
   "pipeline"
       Produced by pipeline/exporter.py.
       Key fields: content, source, title, section, tags, metadata,
                   chunk_id, embedding (optional — reused if present).
 
-The entire JSONL file is staged as a single import batch in Redis
-(one StagingStore entry) so the review queue stays clean.
+Custom schemas can be defined in schemas.yaml at the project root.
+They are checked before the built-in schemas and use the same field-mapping
+format documented in that file.
 """
 from __future__ import annotations
 
@@ -25,11 +25,127 @@ import json
 import logging
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Generator
+from typing import Any, Callable
+
+import yaml
 
 from pipeline.chunker import Chunk
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Custom schema loader
+# ---------------------------------------------------------------------------
+
+_SCHEMAS_FILE = Path(__file__).resolve().parent.parent / "schemas.yaml"
+_custom_schemas: list[dict] | None = None
+
+
+def _load_custom_schemas() -> list[dict]:
+    """Load and cache schemas.yaml. Returns empty list if file is absent or empty."""
+    global _custom_schemas
+    if _custom_schemas is not None:
+        return _custom_schemas
+    if not _SCHEMAS_FILE.exists():
+        _custom_schemas = []
+        return _custom_schemas
+    try:
+        data = yaml.safe_load(_SCHEMAS_FILE.read_text(encoding="utf-8")) or {}
+        _custom_schemas = data.get("schemas") or []
+    except Exception as exc:
+        logger.warning("Could not load schemas.yaml: %s", exc)
+        _custom_schemas = []
+    return _custom_schemas
+
+
+def reload_schemas() -> None:
+    """Force a re-read of schemas.yaml (useful in long-running processes)."""
+    global _custom_schemas
+    _custom_schemas = None
+
+
+def _resolve_field(rec: dict, field_path: str) -> Any:
+    """
+    Get a value from a record using a dot-notated field path.
+
+    Examples:
+        "title"           → rec["title"]
+        "_links.webui"    → rec["_links"]["webui"]
+    """
+    parts = field_path.split(".")
+    val: Any = rec
+    for part in parts:
+        if not isinstance(val, dict):
+            return None
+        val = val.get(part)
+    return val
+
+
+def _detect_custom(record: dict) -> str | None:
+    """
+    Return the name of the first matching custom schema, or None.
+    """
+    for schema_def in _load_custom_schemas():
+        detect = schema_def.get("detect", {})
+        required = detect.get("required") or []
+        exclude  = detect.get("exclude") or []
+
+        if not required:
+            continue
+        if all(r in record for r in required) and not any(e in record for e in exclude):
+            return schema_def["name"]
+    return None
+
+
+def _map_custom(rec: dict, schema_name: str, extra_tags: list[str]) -> tuple[Chunk, list[float] | None]:
+    """Map a record using a named custom schema definition."""
+    schema_def = next(
+        (s for s in _load_custom_schemas() if s["name"] == schema_name), None
+    )
+    if schema_def is None:
+        raise ValueError(f"Custom schema '{schema_name}' not found in schemas.yaml")
+
+    fields       = schema_def.get("fields", {})
+    tags_static  = schema_def.get("tags_static") or []
+    section_join = schema_def.get("section_join", " > ")
+
+    def _get(field: str) -> Any:
+        path = fields.get(field)
+        return _resolve_field(rec, path) if path else None
+
+    # Content
+    content = _get("content") or ""
+
+    # Source
+    source = _get("source") or ""
+
+    # Section — join if it's a list
+    section_raw = _get("section")
+    if isinstance(section_raw, list):
+        section = section_join.join(str(s) for s in section_raw if s)
+    else:
+        section = str(section_raw) if section_raw else ""
+
+    # Tags
+    rec_tags = _get("tags") or []
+    if isinstance(rec_tags, str):
+        rec_tags = [t.strip() for t in rec_tags.split(",") if t.strip()]
+    all_tags = list(dict.fromkeys(list(rec_tags) + list(tags_static) + list(extra_tags)))
+
+    # Embedding
+    raw_emb = _get("embedding")
+    embedding: list[float] | None = raw_emb if isinstance(raw_emb, list) and raw_emb else None
+
+    chunk = Chunk(
+        chunk_id=_get("chunk_id") or rec.get("id") or str(uuid.uuid4()),
+        source=str(source),
+        title=str(_get("title") or ""),
+        section=section,
+        content=str(content),
+        tags=all_tags,
+        metadata={},
+    )
+    return chunk, embedding
 
 
 # ---------------------------------------------------------------------------
@@ -37,7 +153,15 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def detect_schema(record: dict) -> str:
-    """Return "crawler", "pipeline", or "unknown" for a single record."""
+    """
+    Return the schema name for a single record.
+
+    Checks custom schemas (schemas.yaml) first, then the built-in
+    "crawler" and "pipeline" schemas, then falls back to "unknown".
+    """
+    custom = _detect_custom(record)
+    if custom:
+        return custom
     if "text" in record and "page_url" in record:
         return "crawler"
     if "content" in record and "source" in record:
@@ -77,6 +201,10 @@ def map_record(
     """
     extra_tags = extra_tags or []
     embedding: list[float] | None = None
+
+    # Custom schema defined in schemas.yaml
+    if schema not in ("crawler", "pipeline", "unknown"):
+        return _map_custom(rec, schema, extra_tags)
 
     if schema == "crawler":
         tags = [

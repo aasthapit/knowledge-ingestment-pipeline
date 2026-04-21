@@ -1,0 +1,59 @@
+# schemas.yaml
+# ---------------------------------------------------------------------------
+# Custom JSONL document schema definitions.
+#
+# Add a new entry under `schemas:` for each format you want to import.
+# The importer checks these BEFORE the built-in "crawler" and "pipeline"
+# schemas, so your definitions take priority.
+#
+# Structure of each schema entry
+# --------------------------------
+# name:           (string) identifier shown in the UI and ledger
+#
+# detect:
+#   required:     list of field names — ALL must be present to match
+#   exclude:      list of field names — ANY present disqualifies the match
+#
+# fields:
+#   content:      source field name for the chunk body              [required]
+#   source:       source field name for the URL / file path         [required]
+#   title:        source field name for the document title
+#   section:      source field name for the section / breadcrumb
+#   chunk_id:     source field name for a stable unique identifier
+#   tags:         source field name for a list of tag strings
+#   embedding:    source field name for a pre-computed float array
+#                 (if present, embeddings are reused — no API call)
+#
+# tags_static:    list of tag strings always added to every chunk in this schema
+#
+# section_join:   if `section` resolves to a list, join with this separator
+#                 (default " > ")
+# ---------------------------------------------------------------------------
+
+schemas: []
+
+# ── Examples (uncomment and edit to activate) ──────────────────────────────
+
+# - name: my_docs
+#   detect:
+#     required: [body, url]
+#   fields:
+#     content:  body
+#     source:   url
+#     title:    page_title
+#     section:  category
+#     chunk_id: id
+#     tags:     labels
+#     embedding: vector
+#   tags_static: [internal]
+
+# - name: confluence_export
+#   detect:
+#     required: [body_storage, _links]
+#   fields:
+#     content:  body_storage
+#     source:   _links.webui
+#     title:    title
+#     section:  ancestors
+#     chunk_id: id
+#   section_join: " > "
