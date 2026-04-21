@@ -201,3 +201,176 @@ def update_tags(
     key = f"{settings.redis_key_prefix}{chunk_id}"
     client.json().set(key, "$.tags", tags)
     logger.debug("Updated tags for %s → %s", chunk_id, tags)
+
+
+# ---------------------------------------------------------------------------
+# StagingStore — review queue for documents before they reach the vector DB
+# ---------------------------------------------------------------------------
+#
+# Redis key layout:
+#   review:queue               List   — doc IDs waiting for review (FIFO)
+#   review:doc:{id}            Hash   — document metadata + quality info
+#   review:chunks:{id}         List   — JSON-encoded Chunk dicts (pre-embedding)
+#   review:pending             Set    — doc IDs with status "pending_review"
+#   review:approved            Set    — doc IDs approved for push
+#   review:rejected            Set    — doc IDs rejected
+
+_Q_QUEUE    = "review:queue"
+_Q_PENDING  = "review:pending"
+_Q_APPROVED = "review:approved"
+_Q_REJECTED = "review:rejected"
+
+
+class StagingStore:
+    """
+    Manages the document review staging area in Redis.
+
+    Documents are staged here before being embedded and pushed to the
+    production vector store (Redis RediSearch or Qdrant).
+    """
+
+    def __init__(self, client: redis.Redis | None = None) -> None:
+        self._r = client or get_client()
+
+    # ── Enqueue / stage ──────────────────────────────────────────────────
+
+    def enqueue(
+        self,
+        doc_id: str,
+        meta: dict,
+        chunks: list[dict],
+    ) -> None:
+        """
+        Stage a document for review.
+
+        Parameters
+        ----------
+        doc_id:  Stable identifier for this document (e.g. UUID5 of source path).
+        meta:    Flat dict with at minimum: title, source_path, source_type,
+                 quality_score, quality_flags (JSON str), quality_passed (0/1),
+                 chunk_count.
+        chunks:  List of Chunk.to_dict() dicts — stored as JSON strings.
+        """
+        import json as _json
+
+        pipe = self._r.pipeline(transaction=True)
+
+        # Document metadata hash
+        meta_key = f"review:doc:{doc_id}"
+        pipe.hset(meta_key, mapping={k: str(v) for k, v in meta.items()})
+
+        # Chunks list (each chunk serialised as JSON)
+        chunks_key = f"review:chunks:{doc_id}"
+        pipe.delete(chunks_key)
+        for chunk in chunks:
+            pipe.rpush(chunks_key, _json.dumps(chunk, ensure_ascii=False))
+
+        # Enqueue to the FIFO review queue and pending set
+        pipe.rpush(_Q_QUEUE, doc_id)
+        pipe.sadd(_Q_PENDING, doc_id)
+
+        pipe.execute()
+        logger.info("Staged %d chunks for doc '%s' (id=%s).", len(chunks), meta.get("title", "?"), doc_id)
+
+    # ── Status transitions ───────────────────────────────────────────────
+
+    def approve(self, doc_id: str) -> None:
+        """Mark a document as approved (ready to push to vector store)."""
+        pipe = self._r.pipeline(transaction=True)
+        pipe.srem(_Q_PENDING, doc_id)
+        pipe.srem(_Q_REJECTED, doc_id)
+        pipe.sadd(_Q_APPROVED, doc_id)
+        pipe.hset(f"review:doc:{doc_id}", "status", "approved")
+        pipe.execute()
+        logger.info("Approved doc %s.", doc_id)
+
+    def reject(self, doc_id: str, reason: str = "") -> None:
+        """Mark a document as rejected and record the reason."""
+        pipe = self._r.pipeline(transaction=True)
+        pipe.srem(_Q_PENDING, doc_id)
+        pipe.srem(_Q_APPROVED, doc_id)
+        pipe.sadd(_Q_REJECTED, doc_id)
+        pipe.hset(f"review:doc:{doc_id}", mapping={"status": "rejected", "reject_reason": reason})
+        pipe.execute()
+        logger.info("Rejected doc %s (%s).", doc_id, reason or "no reason given")
+
+    # ── Retrieval ────────────────────────────────────────────────────────
+
+    def get_pending(self) -> list[str]:
+        """Return all doc IDs currently in the pending-review set."""
+        return [v.decode() if isinstance(v, bytes) else v
+                for v in self._r.smembers(_Q_PENDING)]
+
+    def get_approved(self) -> list[str]:
+        """Return all doc IDs approved for pushing."""
+        return [v.decode() if isinstance(v, bytes) else v
+                for v in self._r.smembers(_Q_APPROVED)]
+
+    def get_doc_meta(self, doc_id: str) -> dict | None:
+        """Return the metadata hash for a staged document, or None if not found."""
+        key = f"review:doc:{doc_id}"
+        raw = self._r.hgetall(key)
+        if not raw:
+            return None
+        return {
+            (k.decode() if isinstance(k, bytes) else k):
+            (v.decode() if isinstance(v, bytes) else v)
+            for k, v in raw.items()
+        }
+
+    def get_chunks(self, doc_id: str) -> list[dict]:
+        """Return the list of staged Chunk dicts for a document."""
+        import json as _json
+
+        key = f"review:chunks:{doc_id}"
+        raw_list = self._r.lrange(key, 0, -1)
+        return [_json.loads(item) for item in raw_list]
+
+    def list_all(self) -> list[dict]:
+        """
+        Return a summary list of ALL staged documents (pending + approved + rejected).
+        Useful for the ``review list`` CLI command.
+        """
+        import json as _json
+
+        all_ids: set[str] = set()
+        for key in (self._r.smembers(_Q_PENDING) or set()):
+            all_ids.add(key.decode() if isinstance(key, bytes) else key)
+        for key in (self._r.smembers(_Q_APPROVED) or set()):
+            all_ids.add(key.decode() if isinstance(key, bytes) else key)
+        for key in (self._r.smembers(_Q_REJECTED) or set()):
+            all_ids.add(key.decode() if isinstance(key, bytes) else key)
+
+        results = []
+        for doc_id in sorted(all_ids):
+            meta = self.get_doc_meta(doc_id)
+            if meta:
+                meta["doc_id"] = doc_id
+                # Deserialise quality_flags for display
+                try:
+                    meta["quality_flags"] = _json.loads(meta.get("quality_flags", "[]"))
+                except Exception:
+                    meta["quality_flags"] = []
+                results.append(meta)
+        return results
+
+    # ── Cleanup ──────────────────────────────────────────────────────────
+
+    def remove_doc(self, doc_id: str) -> None:
+        """
+        Remove all staging data for a document (call after successful push
+        or explicit deletion).
+        """
+        pipe = self._r.pipeline(transaction=True)
+        pipe.delete(f"review:doc:{doc_id}")
+        pipe.delete(f"review:chunks:{doc_id}")
+        pipe.srem(_Q_PENDING, doc_id)
+        pipe.srem(_Q_APPROVED, doc_id)
+        pipe.srem(_Q_REJECTED, doc_id)
+        pipe.execute()
+        logger.debug("Removed staging data for doc %s.", doc_id)
+
+
+def get_staging(client: redis.Redis | None = None) -> StagingStore:
+    """Convenience factory — returns a :class:`StagingStore` instance."""
+    return StagingStore(client=client)

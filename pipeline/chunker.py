@@ -1,7 +1,14 @@
 """
 chunker.py
-Splits a markdown document into semantically meaningful chunks by heading.
-Also parses YAML front-matter for tags and metadata.
+Splits documents into semantically meaningful chunks.
+
+Two strategies are available:
+  - chunk_markdown / chunk_markdown_file  — heading-based splitting for .md
+  - chunk_docling                          — Docling HybridChunker for PDFs,
+                                             DOCX, HTML, and other rich formats
+
+Both strategies produce the same :class:`Chunk` dataclass.
+Citation metadata is stored in ``Chunk.metadata["citation"]``.
 """
 from __future__ import annotations
 
@@ -9,9 +16,12 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
+
+if TYPE_CHECKING:
+    from pipeline.converter import Citation, ConvertedDocument
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -217,3 +227,116 @@ def chunk_markdown_file(
         max_chars=max_chars,
         overlap=overlap,
     )
+
+
+# ---------------------------------------------------------------------------
+# Docling-based chunker (PDF, DOCX, PPTX, HTML, URLs)
+# ---------------------------------------------------------------------------
+
+def chunk_docling(
+    converted_doc: "ConvertedDocument",
+    tags: list[str] | None = None,
+    max_tokens: int = 512,
+) -> list[Chunk]:
+    """
+    Chunk a :class:`~pipeline.converter.ConvertedDocument` using Docling's
+    HybridChunker, which respects document structure (headings, pages, tables).
+
+    Each chunk receives:
+    - A ``section`` breadcrumb built from the heading hierarchy
+    - The full :class:`~pipeline.converter.Citation` stored in ``metadata["citation"]``
+    - A ``page_number`` in ``metadata["citation"]["page_number"]`` for PDFs
+
+    Falls back to :func:`chunk_markdown` when Docling is unavailable or when
+    the source document was already Markdown (no ``docling_doc``).
+
+    Parameters
+    ----------
+    converted_doc:
+        Output of :func:`~pipeline.converter.convert_document`.
+    tags:
+        Extra tags to attach to every chunk (e.g. from quality auto-tagger).
+    max_tokens:
+        Maximum tokens per chunk for HybridChunker (default 512).
+    """
+    from pipeline.converter import Citation  # runtime import (no circular dep at class def time)
+
+    citation: Citation = converted_doc.citation
+    all_tags: list[str] = list(tags or [])
+
+    # ── Markdown / no docling_doc → fall back to heading-based splitter ───
+    if converted_doc.docling_doc is None:
+        base_chunks = chunk_markdown(
+            converted_doc.markdown,
+            source=citation.source_path,
+            extra_tags=all_tags,
+        )
+        for c in base_chunks:
+            c.metadata["citation"] = citation.to_dict()
+        return base_chunks
+
+    # ── Docling HybridChunker ─────────────────────────────────────────────
+    try:
+        from docling.chunking import HybridChunker
+    except ImportError as exc:
+        raise ImportError(
+            "docling is required for chunk_docling(). "
+            "Install it with: uv add docling"
+        ) from exc
+
+    chunker = HybridChunker(max_tokens=max_tokens, merge_peers=True)
+    docling_chunks = list(chunker.chunk(converted_doc.docling_doc))
+
+    chunks: list[Chunk] = []
+    for dc in docling_chunks:
+        # Serialise to plain text (includes table markdown, list items, etc.)
+        try:
+            text = chunker.serialize(chunk=dc)
+        except Exception:
+            text = getattr(dc, "text", "") or ""
+        if not text.strip():
+            continue
+
+        # ── Section breadcrumb ────────────────────────────────────────────
+        headings: list[str] = []
+        try:
+            raw_headings = dc.meta.headings or []
+            headings = [h for h in raw_headings if h and h.strip()]
+        except Exception:
+            pass
+        section = " > ".join([citation.title] + headings) if headings else citation.title
+
+        # ── Page number (PDF provenance) ──────────────────────────────────
+        page_no: int | None = None
+        try:
+            for item in dc.meta.doc_items:
+                provs = getattr(item, "prov", None) or []
+                if provs:
+                    page_no = provs[0].page_no
+                    break
+        except Exception:
+            pass
+
+        chunk_citation = Citation(
+            source_path=citation.source_path,
+            source_type=citation.source_type,
+            title=citation.title,
+            page_count=citation.page_count,
+            page_number=page_no,
+            author=citation.author,
+            created_date=citation.created_date,
+            url=citation.url,
+        )
+
+        chunks.append(
+            Chunk(
+                source=citation.source_path,
+                title=citation.title,
+                section=section,
+                content=text,
+                tags=list(all_tags),
+                metadata={"citation": chunk_citation.to_dict()},
+            )
+        )
+
+    return chunks

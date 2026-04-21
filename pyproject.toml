@@ -1,11 +1,26 @@
 [project]
 name = "knowledge-ingestment-pipeline"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.2.0"
+description = "Multi-format document ingestion pipeline with quality review and vector storage"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    # Web crawling (existing)
     "beautifulsoup4>=4.14.3",
     "lxml>=6.0.2",
     "requests>=2.33.0",
+    # Document conversion
+    "docling>=2.5.0",
+    # Vector stores
+    "redis[hiredis]>=5.0.3",
+    "qdrant-client>=1.9.0",
+    # Embeddings
+    "openai>=1.30.0",
+    # Config / utilities
+    "python-dotenv>=1.0.0",
+    "pyyaml>=6.0.1",
+    "click>=8.1.7",
+    "rich>=13.7.0",
+    # UI
+    "streamlit>=1.40.0",
 ]

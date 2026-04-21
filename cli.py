@@ -2,11 +2,31 @@
 cli.py
 Command-line interface for the knowledge ingestion pipeline.
 
-Usage examples:
+Usage examples
+--------------
+# Ingest any document (PDF, DOCX, HTML, URL, Markdown) via Docling:
+    python cli.py ingest doc report.pdf --tags finance --auto-push
+    python cli.py ingest doc https://docs.example.com/guide
+
+# Legacy Markdown ingestion (direct to Redis, no staging):
     python cli.py ingest file docs/setup.md --tags python --tags redis
     python cli.py ingest dir ./docs --tags internal
+
+# Review queue (for quality-flagged documents):
+    python cli.py review list
+    python cli.py review show <doc_id>
+    python cli.py review approve <doc_id>
+    python cli.py review reject  <doc_id> --reason "duplicate"
+    python cli.py review push
+    python cli.py review push --doc-id <doc_id>
+
+# Semantic search:
     python cli.py query "How do I configure Redis?"
+
+# Tag management:
     python cli.py retag CHUNK_ID1 CHUNK_ID2 --add devops --remove draft
+
+# Index management:
     python cli.py index create
     python cli.py index drop
 """
@@ -17,12 +37,17 @@ import logging
 import sys
 
 import click
+from rich.console import Console
+from rich.table import Table
+from rich import box
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%H:%M:%S",
 )
+
+_console = Console()
 
 
 # ---------------------------------------------------------------------------
@@ -31,7 +56,7 @@ logging.basicConfig(
 
 @click.group()
 def cli() -> None:
-    """Knowledge Ingestment Pipeline — vectorise markdown → Redis."""
+    """Knowledge Ingestment Pipeline — convert, review, and vectorise documents."""
 
 
 # ---------------------------------------------------------------------------
@@ -40,7 +65,70 @@ def cli() -> None:
 
 @cli.group("ingest")
 def ingest_group() -> None:
-    """Ingest markdown documents into the pipeline."""
+    """Ingest documents into the pipeline."""
+
+
+@ingest_group.command("doc")
+@click.argument("source")
+@click.option("--tags", "-t", multiple=True, help="Extra tags to attach to all chunks.")
+@click.option(
+    "--auto-push",
+    is_flag=True,
+    default=False,
+    help="Immediately embed and push if quality passes (skip manual review step).",
+)
+@click.option(
+    "--quality-threshold",
+    "-q",
+    default=None,
+    type=float,
+    help="Override quality threshold for this document (0.0–1.0).",
+)
+def ingest_doc_cmd(
+    source: str,
+    tags: tuple[str, ...],
+    auto_push: bool,
+    quality_threshold: float | None,
+) -> None:
+    """
+    Ingest any document — PDF, DOCX, PPTX, HTML, URL, or Markdown.
+
+    SOURCE can be a local file path or an HTTP/HTTPS URL.
+    Uses Docling for conversion and quality-based auto-staging.
+    """
+    from pipeline.ingest import ingest_document
+
+    result = ingest_document(
+        source=source,
+        extra_tags=list(tags),
+        quality_threshold=quality_threshold,
+        auto_push=auto_push,
+    )
+
+    _console.print()
+    if result["quality_passed"]:
+        _console.print(f"[bold green]Quality PASS[/] (score={result['quality_score']:.2f})")
+        if auto_push:
+            _console.print(f"[green]Pushed {result['chunk_count']} chunk(s) to vector store.[/]")
+        else:
+            _console.print(
+                f"[green]{result['chunk_count']} chunk(s) staged and auto-approved.[/]\n"
+                "Run [bold]python cli.py review push[/] to push to vector store."
+            )
+    else:
+        _console.print(f"[bold yellow]Quality REVIEW[/] (score={result['quality_score']:.2f})")
+        _console.print(f"[yellow]{result['chunk_count']} chunk(s) staged for human review.[/]")
+        if result["flags"]:
+            _console.print("[dim]Issues:[/]")
+            for flag in result["flags"]:
+                _console.print(f"  [dim]• {flag}[/]")
+        _console.print(
+            f"\nRun [bold]python cli.py review show {result['doc_id']}[/] to inspect."
+        )
+
+    _console.print(f"\n  doc_id : [bold]{result['doc_id']}[/]")
+    _console.print(f"  title  : {result['title']}")
+    _console.print(f"  tags   : {', '.join(result['tags']) or '(none)'}")
 
 
 @ingest_group.command("file")
@@ -95,6 +183,171 @@ def ingest_dir_cmd(
         skip_redis=no_redis,
     )
     click.echo(f"Done. {len(chunks)} total chunk(s) ingested from {directory}.")
+
+
+# ---------------------------------------------------------------------------
+# review sub-group — manage the staging/review queue
+# ---------------------------------------------------------------------------
+
+@cli.group("review")
+def review_group() -> None:
+    """Inspect, approve, reject, and push staged documents."""
+
+
+@review_group.command("list")
+@click.option("--pending-only", is_flag=True, default=False, help="Show only documents awaiting review.")
+def review_list_cmd(pending_only: bool) -> None:
+    """List all staged documents and their quality status."""
+    from pipeline.review import list_all_docs, list_pending_docs
+
+    docs = list_pending_docs() if pending_only else list_all_docs()
+
+    if not docs:
+        _console.print("[dim]No staged documents found.[/]")
+        return
+
+    table = Table(box=box.ROUNDED, show_lines=False, header_style="bold cyan")
+    table.add_column("Status",   style="bold",  width=14)
+    table.add_column("Score",    justify="right", width=6)
+    table.add_column("Title",    no_wrap=False,  max_width=40)
+    table.add_column("Type",     width=8)
+    table.add_column("Chunks",   justify="right", width=7)
+    table.add_column("Doc ID",   width=36)
+
+    STATUS_STYLE = {
+        "approved":       "[green]approved[/]",
+        "pending_review": "[yellow]needs review[/]",
+        "rejected":       "[red]rejected[/]",
+    }
+
+    for d in sorted(docs, key=lambda x: x.get("status", "")):
+        status = d.get("status", "?")
+        score  = d.get("quality_score", "?")
+        try:
+            score_str = f"{float(score):.2f}"
+        except (ValueError, TypeError):
+            score_str = str(score)
+
+        flags = d.get("quality_flags", [])
+        flag_hint = f" ({len(flags)} flag{'s' if len(flags) != 1 else ''})" if flags else ""
+
+        table.add_row(
+            STATUS_STYLE.get(status, status),
+            score_str,
+            d.get("title", "?") + flag_hint,
+            d.get("source_type", "?"),
+            str(d.get("chunk_count", "?")),
+            d.get("doc_id", "?"),
+        )
+
+    _console.print(table)
+    _console.print(f"[dim]{len(docs)} document(s) total[/]")
+
+
+@review_group.command("show")
+@click.argument("doc_id")
+def review_show_cmd(doc_id: str) -> None:
+    """Show full details and sample chunks for a staged document."""
+    from pipeline.review import get_doc_detail
+
+    detail = get_doc_detail(doc_id)
+    if not detail:
+        _console.print(f"[red]Doc ID not found:[/] {doc_id}")
+        sys.exit(1)
+
+    status = detail.get("status", "?")
+    STATUS_COLOUR = {"approved": "green", "pending_review": "yellow", "rejected": "red"}
+    colour = STATUS_COLOUR.get(status, "white")
+
+    _console.rule(f"[bold]{detail.get('title', 'Unknown')}[/]")
+    _console.print(f"  [bold]Doc ID       :[/] {doc_id}")
+    _console.print(f"  [bold]Status       :[/] [{colour}]{status}[/{colour}]")
+    _console.print(f"  [bold]Source       :[/] {detail.get('source_path', '?')}")
+    _console.print(f"  [bold]Type         :[/] {detail.get('source_type', '?')}")
+    _console.print(f"  [bold]Author       :[/] {detail.get('author') or '—'}")
+    _console.print(f"  [bold]Pages        :[/] {detail.get('page_count') or '—'}")
+    _console.print(f"  [bold]Chunks       :[/] {detail.get('chunk_count', 0)}")
+    _console.print(f"  [bold]Quality score:[/] {detail.get('quality_score', '?')}")
+
+    flags = detail.get("quality_flags", [])
+    if flags:
+        _console.print("\n  [bold yellow]Quality flags:[/]")
+        for f in flags:
+            _console.print(f"    • {f}")
+
+    samples = detail.get("sample_chunks", [])
+    if samples:
+        _console.print(f"\n  [bold]Sample chunks ({len(samples)} of {detail['chunk_count']}):[/]")
+        for i, ch in enumerate(samples, 1):
+            section = ch.get("section", "?")
+            content = ch.get("content", "")[:300]
+            tags = ", ".join(ch.get("tags", [])) or "(none)"
+            _console.print(f"\n  [bold cyan][{i}][/] {section}")
+            _console.print(f"      tags: {tags}")
+            _console.print(f"      {content}{'…' if len(ch.get('content','')) > 300 else ''}")
+
+            cit = (ch.get("metadata") or {}).get("citation", {})
+            if cit.get("page_number"):
+                _console.print(f"      [dim]page {cit['page_number']} of {cit.get('page_count', '?')}[/]")
+
+
+@review_group.command("approve")
+@click.argument("doc_id")
+def review_approve_cmd(doc_id: str) -> None:
+    """Approve a staged document (mark it ready to push)."""
+    from pipeline.review import approve_doc
+
+    if approve_doc(doc_id):
+        _console.print(f"[green]Approved[/] {doc_id}.")
+        _console.print("Run [bold]python cli.py review push[/] to push to vector store.")
+    else:
+        _console.print(f"[red]Not found:[/] {doc_id}")
+        sys.exit(1)
+
+
+@review_group.command("reject")
+@click.argument("doc_id")
+@click.option("--reason", "-r", default="", help="Optional reason for rejection.")
+def review_reject_cmd(doc_id: str, reason: str) -> None:
+    """Reject a staged document (it will not be pushed to the vector store)."""
+    from pipeline.review import reject_doc
+
+    if reject_doc(doc_id, reason=reason):
+        _console.print(f"[red]Rejected[/] {doc_id}." + (f" Reason: {reason}" if reason else ""))
+    else:
+        _console.print(f"[red]Not found:[/] {doc_id}")
+        sys.exit(1)
+
+
+@review_group.command("push")
+@click.option("--doc-id", default=None, help="Push only this specific document ID.")
+@click.option(
+    "--keep-staging",
+    is_flag=True,
+    default=False,
+    help="Do not remove staging data after a successful push.",
+)
+def review_push_cmd(doc_id: str | None, keep_staging: bool) -> None:
+    """
+    Embed all approved documents and push them to the vector store.
+
+    Operates on ALL approved documents unless --doc-id is given.
+    """
+    from pipeline.review import push_approved
+
+    _console.print("Embedding and pushing approved documents …")
+    result = push_approved(doc_id=doc_id, remove_after_push=not keep_staging)
+
+    if result["errors"]:
+        for err in result["errors"]:
+            _console.print(f"[red]Error:[/] {err}")
+
+    _console.print(
+        f"[bold green]Done.[/] "
+        f"{result['pushed_docs']} doc(s), "
+        f"{result['pushed_chunks']} chunk(s) pushed to "
+        f"[bold]{__import__('pipeline.config', fromlist=['settings']).settings.vector_backend}[/]."
+    )
 
 
 # ---------------------------------------------------------------------------

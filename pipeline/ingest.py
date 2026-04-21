@@ -1,10 +1,24 @@
 """
 ingest.py
-High-level orchestration: chunk → embed → (export JSONL) → store in Redis.
+High-level orchestration for the knowledge ingestion pipeline.
+
+Two entry points are available:
+
+``ingest_document(source, …)``
+    New path — uses Docling to convert any supported format (PDF, DOCX,
+    PPTX, HTML, URLs, Markdown).  Runs quality assessment, auto-tags
+    well-structured documents, and stages everything in Redis for review
+    before final push to the vector store.
+
+``ingest_file / ingest_directory``
+    Legacy path — Markdown-only, direct to Redis (no staging/review).
+    Kept for backward compatibility.
 """
 from __future__ import annotations
 
+import json
 import logging
+import uuid
 from pathlib import Path
 
 from pipeline import chunker, embedder, exporter, redis_store, tagger
@@ -110,6 +124,195 @@ def ingest_directory(
             redis_store.upsert_chunks(all_chunks, all_vectors)
 
     return all_chunks
+
+
+# ---------------------------------------------------------------------------
+# New path: Docling-powered multi-format ingestion with quality gate
+# ---------------------------------------------------------------------------
+
+def ingest_document(
+    source: str | Path,
+    extra_tags: list[str] | None = None,
+    quality_threshold: float | None = None,
+    auto_push: bool = False,
+) -> dict:
+    """
+    Ingest any supported document format through the full pipeline.
+
+    Steps
+    -----
+    1. Convert with Docling (PDF, DOCX, PPTX, HTML, URL, Markdown).
+    2. Assess structural quality.
+    3. Auto-tag from headings if quality passes.
+    4. Chunk with HybridChunker (preserving citation metadata per chunk).
+    5. Stage all chunks in Redis (StagingStore).
+       - Quality PASS → status ``approved``
+       - Quality FAIL → status ``pending_review`` (requires human decision)
+    6. If ``auto_push=True`` and quality passes, immediately embed and push
+       to the configured vector backend.
+
+    Parameters
+    ----------
+    source:
+        File path or HTTP/HTTPS URL.
+    extra_tags:
+        Additional tags merged with the auto-generated ones.
+    quality_threshold:
+        Override ``settings.quality_threshold`` for this call.
+    auto_push:
+        If True, auto-approved documents are embedded and pushed immediately
+        without waiting for an explicit ``review push`` command.
+
+    Returns
+    -------
+    dict
+        ``{doc_id, title, quality_score, quality_passed, status,
+           chunk_count, tags, flags}``
+    """
+    from pipeline.converter import convert_document
+    from pipeline.quality import assess_quality, extract_tags
+    from pipeline.review import push_approved
+
+    threshold = quality_threshold if quality_threshold is not None else settings.quality_threshold
+
+    # 1 — Convert
+    converted = convert_document(source)
+    citation = converted.citation
+
+    # 2 — Quality assessment
+    result = assess_quality(converted)
+
+    # 3 — Determine tags
+    tags = list(extra_tags or [])
+    if result.passed:
+        # Merge auto-suggested tags (quality assessor already extracted them)
+        for t in result.suggested_tags:
+            if t not in tags:
+                tags.append(t)
+
+    # 4 — Chunk
+    chunks = chunker.chunk_docling(
+        converted,
+        tags=tags,
+        max_tokens=settings.docling_max_tokens,
+    )
+
+    if not chunks:
+        logger.warning("No chunks produced from '%s'.", source)
+
+    # 5 — Stage in Redis
+    doc_id = str(uuid.uuid5(uuid.NAMESPACE_URL, str(source)))
+    status = "approved" if result.passed else "pending_review"
+
+    meta = {
+        "doc_id":           doc_id,
+        "title":            citation.title,
+        "source_path":      citation.source_path,
+        "source_type":      citation.source_type,
+        "author":           citation.author or "",
+        "created_date":     citation.created_date or "",
+        "url":              citation.url or "",
+        "page_count":       citation.page_count or 0,
+        "quality_score":    round(result.score, 4),
+        "quality_passed":   int(result.passed),
+        "quality_flags":    json.dumps(result.flags),
+        "suggested_tags":   json.dumps(tags),
+        "chunk_count":      len(chunks),
+        "status":           status,
+    }
+
+    staging = redis_store.get_staging()
+    staging.enqueue(doc_id, meta, [c.to_dict() for c in chunks])
+
+    if result.passed:
+        staging.approve(doc_id)
+        logger.info(
+            "Auto-approved '%s' (score=%.2f) — %d chunks staged.",
+            citation.title, result.score, len(chunks),
+        )
+    else:
+        logger.warning(
+            "Flagged for review: '%s' (score=%.2f). "
+            "Run 'review list' to inspect.",
+            citation.title, result.score,
+        )
+
+    # 6 — Optional immediate push
+    if auto_push and result.passed:
+        push_result = push_approved(doc_id=doc_id)
+        logger.info("Auto-pushed: %s", push_result)
+
+    return {
+        "doc_id":          doc_id,
+        "title":           citation.title,
+        "quality_score":   round(result.score, 4),
+        "quality_passed":  result.passed,
+        "status":          status,
+        "chunk_count":     len(chunks),
+        "tags":            tags,
+        "flags":           result.flags,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Legacy path — Markdown only, direct to Redis, no staging/review
+# ---------------------------------------------------------------------------
+
+def query_vectorstore(
+    question: str,
+    top_k: int = 5,
+    tag_filter: list[str] | None = None,
+    source_type: str | None = None,
+) -> list[dict]:
+    """
+    Embed *question* and search whichever vector backend is configured.
+
+    Normalises scores to a 0–1 similarity value (higher = more relevant)
+    regardless of backend, and adds a ``normalized_score`` key to every
+    result dict for consistent UI display.
+
+    Parameters
+    ----------
+    tag_filter:   List of tag strings — at least one must match.
+    source_type:  Restrict to a specific source type (e.g. ``"pdf"``).
+    """
+    settings.validate()
+    vectors = embedder.embed_texts([question])
+    vec = vectors[0]
+    backend = settings.vector_backend
+
+    if backend == "qdrant":
+        from pipeline import qdrant_store
+        results = qdrant_store.search(
+            vec, top_k=top_k,
+            tag_filter=tag_filter,
+            source_type_filter=source_type,
+        )
+        # Qdrant cosine similarity: 1 = identical, already in ~[0,1] for text
+        for r in results:
+            r["normalized_score"] = round(max(0.0, float(r.get("score", 0))), 4)
+    else:
+        # Redis cosine distance: 0 = identical, ~[0,2] range
+        redis_tag_filter = None
+        if tag_filter:
+            redis_tag_filter = "@tags:{" + "|".join(tag_filter) + "}"
+        results = redis_store.search(vec, top_k=top_k, tag_filter=redis_tag_filter)
+        for r in results:
+            raw = float(r.get("score", 1.0))
+            r["normalized_score"] = round(max(0.0, min(1.0, 1.0 - raw)), 4)
+            # Normalise tags from Redis string → list
+            tags_raw = r.get("tags", "")
+            if isinstance(tags_raw, str):
+                r["tags"] = [t.strip() for t in tags_raw.split(",") if t.strip()]
+            # Qdrant-style citation stub so UI code is uniform
+            if "citation" not in r:
+                r["citation"] = {
+                    "source_path": r.get("source", ""),
+                    "source_type": "",
+                    "title": r.get("title", ""),
+                }
+
+    return results
 
 
 def query(

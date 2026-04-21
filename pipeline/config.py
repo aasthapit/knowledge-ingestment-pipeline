@@ -45,6 +45,22 @@ class Settings:
     # ── JSONL Export ──────────────────────────────────────────────────────
     jsonl_output_dir: Path = Path(os.getenv("JSONL_OUTPUT_DIR", "./output"))
 
+    # ── Quality Assessment ────────────────────────────────────────────────
+    quality_threshold: float = float(os.getenv("QUALITY_THRESHOLD", "0.6"))
+
+    # ── Vector Backend ────────────────────────────────────────────────────
+    # "redis" uses existing RediSearch index; "qdrant" pushes to Qdrant
+    vector_backend: Literal["redis", "qdrant"] = os.getenv("VECTOR_BACKEND", "redis")  # type: ignore[assignment]
+
+    # ── Qdrant ────────────────────────────────────────────────────────────
+    qdrant_url: str = os.getenv("QDRANT_URL", "http://localhost:6333")
+    qdrant_api_key: str = os.getenv("QDRANT_API_KEY", "")
+    qdrant_collection: str = os.getenv("QDRANT_COLLECTION", "knowledge_base")
+
+    # ── Docling Chunker ───────────────────────────────────────────────────
+    # Max tokens per chunk when using HybridChunker
+    docling_max_tokens: int = int(os.getenv("DOCLING_MAX_TOKENS", "512"))
+
     def validate(self) -> None:
         """Raise ValueError for obviously missing required settings."""
         if self.embedding_provider == "openai" and not self.openai_api_key:
