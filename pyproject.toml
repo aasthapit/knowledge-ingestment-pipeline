@@ -9,6 +9,8 @@ dependencies = [
     "beautifulsoup4>=4.14.3",
     "lxml>=6.0.2",
     "requests>=2.33.0",
+    # Confluence
+    "atlassian-python-api>=3.41.0",
     # Document conversion
     "docling>=2.5.0",
     # Vector stores

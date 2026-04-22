@@ -28,9 +28,8 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterator
-from urllib.parse import urljoin, urlparse
 
-import requests
+from atlassian import Confluence
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
@@ -146,8 +145,6 @@ class ConfluenceCrawler:
         Defaults to True.
     """
 
-    _API_V1 = "/wiki/rest/api"
-
     def __init__(
         self,
         base_url: str,
@@ -159,50 +156,40 @@ class ConfluenceCrawler:
     ) -> None:
         self.base_url  = base_url.rstrip("/")
         self.auth_type = auth_type.lower()
-        self.timeout   = timeout
-
-        self._session = requests.Session()
-        self._session.headers.update({"Accept": "application/json"})
-        self._session.verify = verify_ssl
 
         if self.auth_type == "cloud":
             if not email or not api_token:
                 raise ValueError("Cloud auth requires both email and api_token.")
-            self._session.auth = (email, api_token)
+            self._confluence = Confluence(
+                url=self.base_url,
+                username=email,
+                password=api_token,
+                cloud=True,
+                verify_ssl=verify_ssl,
+                timeout=timeout,
+            )
         else:
             if not api_token:
                 raise ValueError("Server auth requires an api_token (Personal Access Token).")
-            self._session.headers["Authorization"] = f"Bearer {api_token}"
+            self._confluence = Confluence(
+                url=self.base_url,
+                token=api_token,
+                verify_ssl=verify_ssl,
+                timeout=timeout,
+            )
 
     # ------------------------------------------------------------------
-    # Low-level API helpers
+    # API helpers
     # ------------------------------------------------------------------
-
-    def _get(self, path: str, params: dict | None = None) -> dict:
-        url = self.base_url + self._API_V1 + path
-        resp = self._session.get(url, params=params, timeout=self.timeout)
-        resp.raise_for_status()
-        return resp.json()
 
     def _get_page(self, page_id: str) -> dict:
-        return self._get(
-            f"/content/{page_id}",
-            params={
-                "expand": (
-                    "body.storage,"
-                    "ancestors,"
-                    "metadata.labels,"
-                    "version,"
-                    "space"
-                )
-            },
+        return self._confluence.get_page_by_id(
+            page_id,
+            expand="body.storage,ancestors,metadata.labels,version,space",
         )
 
-    def _get_children(self, page_id: str, start: int = 0, limit: int = 50) -> dict:
-        return self._get(
-            f"/content/{page_id}/child/page",
-            params={"start": start, "limit": limit, "expand": ""},
-        )
+    def _get_children(self, page_id: str) -> list[dict]:
+        return self._confluence.get_child_pages(page_id)
 
     def _page_url(self, page_id: str, space_key: str, title: str) -> str:
         """Build the canonical web URL for a page."""
@@ -266,7 +253,7 @@ class ConfluenceCrawler:
         max_depth: int,
         visited: set[str],
     ) -> Iterator[str]:
-        """Yield all descendant page IDs via BFS."""
+        """Yield all descendant page IDs via DFS."""
         if page_id in visited:
             return
         visited.add(page_id)
@@ -274,21 +261,13 @@ class ConfluenceCrawler:
         if max_depth >= 0 and depth > max_depth:
             return
 
-        start = 0
-        limit = 50
-        while True:
-            data = self._get_children(page_id, start=start, limit=limit)
-            results = data.get("results", [])
-            for child in results:
-                child_id = str(child["id"])
-                if child_id not in visited:
-                    yield child_id
-                    yield from self._iter_descendants(
-                        child_id, depth + 1, max_depth, visited
-                    )
-            if len(results) < limit:
-                break
-            start += limit
+        for child in self._get_children(page_id):
+            child_id = str(child["id"])
+            if child_id not in visited:
+                yield child_id
+                yield from self._iter_descendants(
+                    child_id, depth + 1, max_depth, visited
+                )
 
     def crawl(
         self,
