@@ -1,8 +1,11 @@
 """Review Queue — inspect, approve, reject, and push staged documents."""
 import json
 import math
+import re
 
 import streamlit as st
+
+from pipeline.chunker import _split_large_chunk
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -39,6 +42,16 @@ def _safe_float(v, default=0.0) -> float:
         return float(v)
     except (TypeError, ValueError):
         return default
+
+
+def _clean_content(text: str) -> str:
+    text = text.strip()
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return "\n".join(line.rstrip() for line in text.splitlines())
+
+
+def _split_by_delimiter(text: str) -> list[str]:
+    return [p.strip() for p in re.split(r'\n{2,}', text) if p.strip()]
 
 
 # ── Load data ─────────────────────────────────────────────────────────────────
@@ -243,9 +256,70 @@ for doc in visible_docs:
                                 if page_no:
                                     st.caption(f"Page {page_no}")
 
-                                # Content (collapsed)
+                                # Content (collapsed) — editable
                                 with st.expander("Content", expanded=False):
-                                    st.text(content)
+                                    edited = st.text_area(
+                                        "",
+                                        value=content,
+                                        height=200,
+                                        key=f"content_{chunk_id}",
+                                        label_visibility="collapsed",
+                                    )
+                                    c1, c2 = st.columns(2)
+                                    with c1:
+                                        if st.button("💾 Save content", key=f"save_content_{chunk_id}"):
+                                            rev.update_chunk(doc_id, chunk_id, {"content": edited.strip()})
+                                            st.toast("Content updated", icon="💾")
+                                            st.cache_data.clear()
+                                            st.rerun()
+                                    with c2:
+                                        if st.button("🧹 Clean formatting", key=f"clean_{chunk_id}"):
+                                            cleaned = _clean_content(edited)
+                                            rev.update_chunk(doc_id, chunk_id, {"content": cleaned})
+                                            st.toast("Formatting cleaned", icon="🧹")
+                                            st.cache_data.clear()
+                                            st.rerun()
+
+                                    with st.expander("✂️ Split into subchunks", expanded=False):
+                                        split_mode = st.radio(
+                                            "Split by",
+                                            ["Blank lines (\\n\\n)", "Character limit"],
+                                            key=f"smode_{chunk_id}",
+                                            horizontal=True,
+                                        )
+                                        max_chars = 1000
+                                        if "Character limit" in split_mode:
+                                            max_chars = st.number_input(
+                                                "Max chars", 200, 5000, 1000,
+                                                key=f"maxc_{chunk_id}",
+                                            )
+
+                                        if st.button("Preview", key=f"prev_{chunk_id}"):
+                                            parts = (
+                                                _split_by_delimiter(edited)
+                                                if "Blank" in split_mode
+                                                else _split_large_chunk(edited, max_chars, 0)
+                                            )
+                                            st.caption(f"{len(parts)} part(s)")
+                                            for i, p in enumerate(parts):
+                                                st.text(f"[{i + 1}] {p[:120]}{'…' if len(p) > 120 else ''}")
+
+                                        if st.button("✅ Confirm split", key=f"conf_{chunk_id}", type="primary"):
+                                            parts = (
+                                                _split_by_delimiter(edited)
+                                                if "Blank" in split_mode
+                                                else _split_large_chunk(edited, max_chars, 0)
+                                            )
+                                            if len(parts) < 2:
+                                                st.warning("Need at least 2 parts to split. Use Save Content instead.")
+                                            else:
+                                                new_ids = rev.split_chunk(doc_id, chunk_id, parts)
+                                                if new_ids:
+                                                    st.toast(f"Split into {len(new_ids)} subchunks", icon="✂️")
+                                                    st.cache_data.clear()
+                                                    st.rerun()
+                                                else:
+                                                    st.error("Split failed — chunk not found.")
 
                                 # Tag editor
                                 tag_str = st.text_input(

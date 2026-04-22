@@ -55,10 +55,55 @@ def _embed_sentence_transformers(texts: list[str]) -> list[list[float]]:
     return [e.tolist() for e in embeddings]
 
 
+def _embed_custom(texts: list[str]) -> list[list[float]]:
+    """
+    POST to any OpenAI-compatible /embeddings endpoint.
+
+    Configure via .env:
+        EMBEDDING_PROVIDER=custom
+        EMBEDDING_CUSTOM_URL=http://localhost:11434/v1/embeddings
+        EMBEDDING_CUSTOM_API_KEY=          # optional Bearer token
+        EMBEDDING_CUSTOM_HEADERS={}        # optional extra headers (JSON object)
+        EMBEDDING_MODEL=nomic-embed-text   # model name sent in the request body
+
+    Request body:  {"model": EMBEDDING_MODEL, "input": ["text", ...]}
+    Accepted response shapes:
+        {"data": [{"embedding": [...]}, ...]}   — OpenAI / vLLM / LiteLLM
+        {"embeddings": [[...], ...]}             — Ollama native
+
+    To add a Python-native provider instead of an HTTP endpoint:
+        1. Define a function: (list[str]) -> list[list[float]]
+        2. Add it to _PROVIDERS under a new key string
+        3. Set EMBEDDING_PROVIDER=<that key> in .env
+    """
+    import json
+    import urllib.request
+
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if settings.embedding_custom_api_key:
+        headers["Authorization"] = f"Bearer {settings.embedding_custom_api_key}"
+    headers.update(json.loads(settings.embedding_custom_headers))
+
+    body = json.dumps({"model": settings.embedding_model, "input": texts}).encode()
+    req = urllib.request.Request(settings.embedding_custom_url, data=body, headers=headers)
+    with urllib.request.urlopen(req) as resp:
+        result = json.loads(resp.read())
+
+    if "data" in result:
+        return [item["embedding"] for item in result["data"]]
+    if "embeddings" in result:
+        return result["embeddings"]
+    raise ValueError(
+        f"Unrecognised embedding response shape from custom endpoint: {list(result.keys())}. "
+        "Expected 'data' (OpenAI-style) or 'embeddings' (Ollama-style)."
+    )
+
+
 _PROVIDERS = {
     "openai": _embed_openai,
     "azure": _embed_azure,
     "sentence-transformers": _embed_sentence_transformers,
+    "custom": _embed_custom,
 }
 
 

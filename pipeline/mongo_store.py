@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable
 from urllib.parse import quote_plus
@@ -119,8 +120,8 @@ class MongoStagingStore:
 
     def __init__(self, db: Database | None = None) -> None:
         self._db = db or _get_db()
-        self._docs: Collection   = self._db[_coll_name("staging_docs")]
-        self._chunks: Collection = self._db[_coll_name("staging_chunks")]
+        self._docs: Collection   = self._db[_coll_name(settings.mongodb_coll_staging_docs)]
+        self._chunks: Collection = self._db[_coll_name(settings.mongodb_coll_staging_chunks)]
         self._ensure_indexes()
 
     def _ensure_indexes(self) -> None:
@@ -308,6 +309,45 @@ class MongoStagingStore:
         )
         return moved
 
+    def split_chunk(
+        self,
+        doc_id: str,
+        source_chunk_id: str,
+        content_parts: list[str],
+    ) -> list[str]:
+        """
+        Replace *source_chunk_id* with N new chunks, one per entry in
+        *content_parts*.  All metadata (section, tags, citation, page_number)
+        is inherited from the original chunk unchanged.
+
+        Returns the list of new chunk_ids, or [] if the operation was a
+        no-op (chunk not found, or all content_parts were blank).
+        """
+        import copy
+
+        original = self._chunks.find_one({"_id": source_chunk_id})
+        if not original:
+            return []
+
+        clean_parts = [p.strip() for p in content_parts if p.strip()]
+        if not clean_parts:
+            return []
+
+        new_ids: list[str] = []
+        for part in clean_parts:
+            new_chunk = copy.deepcopy(original)
+            new_chunk["_id"] = str(uuid.uuid4())
+            new_chunk["content"] = part
+            self._chunks.insert_one(new_chunk)
+            new_ids.append(new_chunk["_id"])
+
+        self._chunks.delete_one({"_id": source_chunk_id})
+
+        new_count = self._chunks.count_documents({"doc_id": doc_id})
+        self._docs.update_one({"_id": doc_id}, {"$set": {"chunk_count": new_count}})
+
+        return new_ids
+
     def remove_doc(self, doc_id: str) -> None:
         """Remove a document and its chunks from staging (called after push)."""
         self._docs.delete_one({"_id": doc_id})
@@ -394,7 +434,8 @@ class KBLedger:
 
     def __init__(self, db: Database | None = None) -> None:
         self._db = db or _get_db()
-        self._coll: Collection = self._db[_coll_name("kb_documents")]
+        self._coll: Collection = self._db[_coll_name(settings.mongodb_coll_kb_documents)]
+        self._snaps: Collection = self._db[_coll_name(settings.mongodb_coll_kb_snapshots)]
         self._ensure_indexes()
 
     def _ensure_indexes(self) -> None:
@@ -402,6 +443,7 @@ class KBLedger:
         self._coll.create_index("source_path")
         self._coll.create_index("drift_status")
         self._coll.create_index("pushed_at")
+        self._snaps.create_index("created_at")
 
     def record_push(
         self,
@@ -624,6 +666,78 @@ class KBLedger:
                     doc[key] = val.isoformat()
             results.append(doc)
         return results
+
+    def record_snapshot(self, pushed_doc_ids: list[str]) -> str:
+        """
+        Store a point-in-time snapshot of the full KB ledger state.
+
+        Called automatically by push_approved() after a successful push.
+        Captures lightweight doc summaries (no chunk content) so the full
+        KB composition at each push event is queryable later.
+
+        Returns the snapshot_id.
+        """
+        now = datetime.now(timezone.utc)
+        snapshot_id = str(uuid.uuid4())
+
+        # Collect current state of every doc in the ledger
+        doc_summaries = []
+        for doc in self._coll.find(
+            {},
+            {
+                "title": 1, "source_path": 1, "source_type": 1,
+                "kb_name": 1, "chunk_count": 1, "quality_score": 1,
+                "tags": 1, "pushed_at": 1, "drift_status": 1,
+            },
+        ):
+            doc_id = doc.pop("_id")
+            pushed_at = doc.get("pushed_at")
+            if isinstance(pushed_at, datetime):
+                doc["pushed_at"] = pushed_at.isoformat()
+            doc["doc_id"] = doc_id
+            doc_summaries.append(doc)
+
+        total_chunks = sum(d.get("chunk_count", 0) for d in doc_summaries)
+
+        record: dict[str, Any] = {
+            "_id":              snapshot_id,
+            "created_at":       now,
+            "pushed_doc_ids":   pushed_doc_ids,
+            "pushed_doc_count": len(pushed_doc_ids),
+            "total_docs":       len(doc_summaries),
+            "total_chunks":     total_chunks,
+            "docs":             doc_summaries,
+        }
+        self._snaps.insert_one(record)
+        logger.debug("Ledger snapshot %s recorded (%d total docs)", snapshot_id, len(doc_summaries))
+        return snapshot_id
+
+    def list_snapshots(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Return recent snapshots (newest first), without the full docs list."""
+        results = []
+        for snap in self._snaps.find(
+            {},
+            {"docs": 0},  # exclude the docs array for the summary list
+            sort=[("created_at", DESCENDING)],
+            limit=limit,
+        ):
+            snap["snapshot_id"] = snap.pop("_id")
+            created_at = snap.get("created_at")
+            if isinstance(created_at, datetime):
+                snap["created_at"] = created_at.isoformat()
+            results.append(snap)
+        return results
+
+    def get_snapshot(self, snapshot_id: str) -> dict[str, Any] | None:
+        """Return a full snapshot record including the docs list, or None."""
+        snap = self._snaps.find_one({"_id": snapshot_id})
+        if snap is None:
+            return None
+        snap["snapshot_id"] = snap.pop("_id")
+        created_at = snap.get("created_at")
+        if isinstance(created_at, datetime):
+            snap["created_at"] = created_at.isoformat()
+        return snap
 
     def delete_doc(self, doc_id: str) -> bool:
         """Remove a document from the ledger (e.g. after it's been deleted from the KB)."""

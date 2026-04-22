@@ -18,11 +18,16 @@ load_dotenv(_ROOT / ".env", override=False)
 
 class Settings:
     # ── Embedding ──────────────────────────────────────────────────────────
-    embedding_provider: Literal["openai", "azure", "sentence-transformers"] = (
+    embedding_provider: Literal["openai", "azure", "sentence-transformers", "custom"] = (
         os.getenv("EMBEDDING_PROVIDER", "openai")
     )
     embedding_model: str = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
     embedding_dimensions: int = int(os.getenv("EMBEDDING_DIMENSIONS", "1536"))
+    # Custom HTTP endpoint (any OpenAI-compatible /embeddings API)
+    embedding_custom_url:     str = os.getenv("EMBEDDING_CUSTOM_URL", "")
+    embedding_custom_api_key: str = os.getenv("EMBEDDING_CUSTOM_API_KEY", "")
+    # JSON object of extra HTTP headers, e.g. '{"X-API-Version": "2"}'
+    embedding_custom_headers: str = os.getenv("EMBEDDING_CUSTOM_HEADERS", "{}")
 
     # ── OpenAI ────────────────────────────────────────────────────────────
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
@@ -44,6 +49,10 @@ class Settings:
 
     # ── JSONL Export ──────────────────────────────────────────────────────
     jsonl_output_dir: Path = Path(os.getenv("JSONL_OUTPUT_DIR", "./output"))
+    # When set, a CSV ledger snapshot is written here after every push.
+    ledger_output_dir: Path | None = (
+        Path(os.getenv("LEDGER_OUTPUT_DIR")) if os.getenv("LEDGER_OUTPUT_DIR") else None
+    )
 
     # ── Quality Assessment ────────────────────────────────────────────────
     quality_threshold: float = float(os.getenv("QUALITY_THRESHOLD", "0.6"))
@@ -93,6 +102,11 @@ class Settings:
     # Prefix applied to every collection name — useful when sharing one DB
     # across multiple environments (e.g. "prod_" → prod_staging_docs).
     mongodb_collection_prefix: str = os.getenv("MONGODB_COLLECTION_PREFIX", "")
+    # Override individual collection base names (prefix still applied on top).
+    mongodb_coll_staging_docs:   str = os.getenv("MONGODB_COLL_STAGING_DOCS",   "staging_docs")
+    mongodb_coll_staging_chunks: str = os.getenv("MONGODB_COLL_STAGING_CHUNKS", "staging_chunks")
+    mongodb_coll_kb_documents:   str = os.getenv("MONGODB_COLL_KB_DOCUMENTS",   "kb_documents")
+    mongodb_coll_kb_snapshots:   str = os.getenv("MONGODB_COLL_KB_SNAPSHOTS",   "kb_snapshots")
 
     def validate(self) -> None:
         """Raise ValueError for obviously missing required settings."""
@@ -113,6 +127,11 @@ class Settings:
             ]
             if missing:
                 raise ValueError(f"Missing Azure OpenAI settings: {missing}")
+        if self.embedding_provider == "custom" and not self.embedding_custom_url:
+            raise ValueError(
+                "EMBEDDING_CUSTOM_URL is required when EMBEDDING_PROVIDER=custom. "
+                "Set it to your embedding endpoint (e.g. http://localhost:11434/v1/embeddings)."
+            )
 
 
 settings = Settings()

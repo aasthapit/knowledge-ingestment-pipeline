@@ -105,6 +105,20 @@ def update_chunk(doc_id: str, chunk_id: str, updates: dict[str, Any]) -> bool:
     return _staging().update_chunk(chunk_id, updates)
 
 
+def split_chunk(doc_id: str, chunk_id: str, content_parts: list[str]) -> list[str]:
+    """
+    Split a single staged chunk into multiple subchunks.
+
+    Each string in *content_parts* becomes a new chunk, inheriting all
+    metadata (section, tags, citation, page_number) from the original.
+    The original chunk is deleted.
+
+    Returns the list of new chunk_ids, or [] if the operation was a no-op
+    (chunk not found, or all content_parts were blank).
+    """
+    return _staging().split_chunk(doc_id, chunk_id, content_parts)
+
+
 def split_doc(source_doc_id: str, chunk_ids: list[str], new_title: str) -> str | None:
     """
     Break a subset of chunks out of *source_doc_id* into a new staged document.
@@ -201,6 +215,7 @@ def push_approved(
 
     pushed_docs = 0
     pushed_chunks = 0
+    pushed_doc_ids: list[str] = []
     errors: list[str] = []
 
     for did in doc_ids:
@@ -260,6 +275,7 @@ def push_approved(
 
             pushed_docs += 1
             pushed_chunks += len(chunks)
+            pushed_doc_ids.append(did)
 
             # Record push in the KB ledger for drift tracking
             try:
@@ -285,6 +301,24 @@ def push_approved(
         except Exception as exc:
             logger.error("Failed to push doc %s: %s", did, exc, exc_info=True)
             errors.append(f"{did}: {exc}")
+
+    if pushed_docs > 0:
+        # Store a point-in-time snapshot of the full KB state in MongoDB
+        try:
+            snap_id = mongo_store.get_ledger().record_snapshot(pushed_doc_ids)
+            logger.info("Ledger snapshot %s recorded (%d docs pushed)", snap_id, len(pushed_doc_ids))
+        except Exception as snap_exc:
+            logger.warning("Could not record ledger snapshot: %s", snap_exc)
+
+        # Optionally also write a CSV file if LEDGER_OUTPUT_DIR is configured
+        if settings.ledger_output_dir:
+            try:
+                from pipeline.exporter import export_ledger_csv
+                all_records = mongo_store.get_ledger().list_docs(limit=2000)
+                csv_path = export_ledger_csv(all_records)
+                logger.info("Ledger CSV written to %s", csv_path)
+            except Exception as ledger_exc:
+                logger.warning("Could not export ledger CSV: %s", ledger_exc)
 
     return {
         "pushed_docs":   pushed_docs,
