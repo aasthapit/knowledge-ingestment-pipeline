@@ -73,7 +73,7 @@ def get_doc_detail(doc_id: str) -> dict[str, Any] | None:
         meta["quality_flags"] = []
 
     chunks = staging.get_chunks(doc_id)
-    meta["sample_chunks"] = chunks[:3]
+    meta["sample_chunks"] = chunks          # all chunks (UI paginates)
     meta["chunk_count"] = len(chunks)
     meta["doc_id"] = doc_id
     return meta
@@ -94,6 +94,53 @@ def approve_doc(doc_id: str) -> bool:
         return False
     staging.approve(doc_id)
     return True
+
+
+def update_chunk(doc_id: str, chunk_id: str, updates: dict[str, Any]) -> bool:
+    """
+    Update fields on a single staged chunk (e.g. tags, content, section).
+
+    Returns True if the chunk was found, False otherwise.
+    """
+    return _staging().update_chunk(chunk_id, updates)
+
+
+def split_doc(source_doc_id: str, chunk_ids: list[str], new_title: str) -> str | None:
+    """
+    Break a subset of chunks out of *source_doc_id* into a new staged document.
+
+    The new document inherits source metadata (source_path, kb_name, …) but
+    gets its own doc_id and status ``pending_review``.
+
+    Returns the new doc_id, or None if the source document was not found.
+    """
+    staging = _staging()
+    meta = staging.get_doc_meta(source_doc_id)
+    if not meta:
+        return None
+
+    new_doc_id = str(uuid.uuid4())
+    new_meta = {
+        "title":          new_title,
+        "source_path":    meta.get("source_path", ""),
+        "source_type":    meta.get("source_type", ""),
+        "author":         meta.get("author", ""),
+        "created_date":   meta.get("created_date", ""),
+        "url":            meta.get("url", ""),
+        "page_count":     0,
+        "quality_score":  meta.get("quality_score", 1.0),
+        "quality_passed": meta.get("quality_passed", True),
+        "quality_flags":  meta.get("quality_flags", []),
+        "suggested_tags": meta.get("suggested_tags", []),
+        "schema_type":    meta.get("schema_type", ""),
+        "kb_name":        meta.get("kb_name", "default"),
+    }
+    moved = staging.split_doc(source_doc_id, new_doc_id, chunk_ids, new_meta)
+    logger.info(
+        "split_doc: moved %d chunks from %s → %s (%s)",
+        moved, source_doc_id, new_doc_id, new_title,
+    )
+    return new_doc_id
 
 
 def reject_doc(doc_id: str, reason: str = "") -> bool:

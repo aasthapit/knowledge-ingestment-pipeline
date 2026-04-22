@@ -249,6 +249,65 @@ class MongoStagingStore:
             {"$set": {"status": "pushed", "pushed_at": datetime.now(timezone.utc)}},
         )
 
+    def update_chunk(self, chunk_id: str, updates: dict[str, Any]) -> bool:
+        """Update fields on a single staged chunk. Returns True if the chunk was found."""
+        result = self._chunks.update_one({"_id": chunk_id}, {"$set": updates})
+        return result.matched_count > 0
+
+    def split_doc(
+        self,
+        source_doc_id: str,
+        new_doc_id: str,
+        chunk_ids: list[str],
+        new_meta: dict[str, Any],
+    ) -> int:
+        """
+        Move *chunk_ids* from *source_doc_id* into a freshly created doc
+        (*new_doc_id*).  Updates the source doc's chunk_count.
+
+        Returns the number of chunks actually moved.
+        """
+        now = datetime.now(timezone.utc)
+        doc: dict[str, Any] = {
+            "_id":                    new_doc_id,
+            "title":                  new_meta.get("title", ""),
+            "source_path":            new_meta.get("source_path", ""),
+            "source_type":            new_meta.get("source_type", ""),
+            "author":                 new_meta.get("author", ""),
+            "created_date":           new_meta.get("created_date", ""),
+            "url":                    new_meta.get("url", ""),
+            "page_count":             new_meta.get("page_count", 0),
+            "quality_score":          new_meta.get("quality_score", 1.0),
+            "quality_passed":         new_meta.get("quality_passed", True),
+            "quality_flags":          new_meta.get("quality_flags", []),
+            "suggested_tags":         new_meta.get("suggested_tags", []),
+            "chunk_count":            len(chunk_ids),
+            "status":                 "pending_review",
+            "schema_type":            new_meta.get("schema_type", ""),
+            "unique_sources":         0,
+            "has_embeddings":         False,
+            "has_partial_embeddings": False,
+            "kb_name":                new_meta.get("kb_name", "default"),
+            "ingested_at":            now,
+            "approved_at":            None,
+            "pushed_at":              None,
+            "reject_reason":          None,
+        }
+        self._docs.insert_one(doc)
+
+        result = self._chunks.update_many(
+            {"_id": {"$in": chunk_ids}},
+            {"$set": {"doc_id": new_doc_id}},
+        )
+        moved = result.modified_count
+
+        remaining = self._chunks.count_documents({"doc_id": source_doc_id})
+        self._docs.update_one(
+            {"_id": source_doc_id},
+            {"$set": {"chunk_count": remaining}},
+        )
+        return moved
+
     def remove_doc(self, doc_id: str) -> None:
         """Remove a document and its chunks from staging (called after push)."""
         self._docs.delete_one({"_id": doc_id})

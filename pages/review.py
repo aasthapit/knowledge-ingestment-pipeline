@@ -1,5 +1,6 @@
 """Review Queue — inspect, approve, reject, and push staged documents."""
 import json
+import math
 
 import streamlit as st
 
@@ -168,32 +169,127 @@ for doc in visible_docs:
                 for flag in flags:
                     st.write(f"• {flag}")
 
-        # ── Row 4: sample sections ────────────────────────────────────────
-        with st.expander("🔍  Preview document sections"):
+        # ── Row 4: section editor ─────────────────────────────────────────
+        _PAGE_SIZE = 10
+        page_key     = f"sp_{doc_id}"
+        selected_key = f"sel_{doc_id}"
+        if page_key     not in st.session_state: st.session_state[page_key]     = 0
+        if selected_key not in st.session_state: st.session_state[selected_key] = set()
+
+        with st.expander(f"✏️  Sections ({chunks})"):
             try:
                 from pipeline import review as rev
-                detail = rev.get_doc_detail(doc_id)
-                samples = (detail or {}).get("sample_chunks", [])
-                if samples:
-                    for i, chunk in enumerate(samples, 1):
+                detail     = rev.get_doc_detail(doc_id)
+                all_chunks = (detail or {}).get("sample_chunks", [])
+                if not all_chunks:
+                    st.caption("No sections available.")
+                else:
+                    total_pages = max(1, math.ceil(len(all_chunks) / _PAGE_SIZE))
+                    page        = min(st.session_state[page_key], total_pages - 1)
+                    st.session_state[page_key] = page
+                    page_chunks = all_chunks[page * _PAGE_SIZE : (page + 1) * _PAGE_SIZE]
+
+                    # ── Pagination controls ───────────────────────────────
+                    pc1, pc2, pc3 = st.columns([1, 3, 1])
+                    with pc1:
+                        if st.button("← Prev", key=f"prev_{doc_id}", disabled=page == 0,
+                                     use_container_width=True):
+                            st.session_state[page_key] = page - 1
+                            st.rerun()
+                    with pc2:
+                        start = page * _PAGE_SIZE + 1
+                        end   = min(start + _PAGE_SIZE - 1, len(all_chunks))
+                        st.caption(
+                            f"Sections {start}–{end} of {len(all_chunks)}"
+                            + (f"  ·  page {page + 1}/{total_pages}" if total_pages > 1 else "")
+                        )
+                    with pc3:
+                        if st.button("Next →", key=f"next_{doc_id}",
+                                     disabled=page >= total_pages - 1,
+                                     use_container_width=True):
+                            st.session_state[page_key] = page + 1
+                            st.rerun()
+
+                    # ── Section rows ──────────────────────────────────────
+                    for chunk in page_chunks:
+                        chunk_id = chunk.get("chunk_id", "")
                         section  = chunk.get("section", "—")
                         content  = chunk.get("content", "")
                         tags     = chunk.get("tags", [])
                         cit      = (chunk.get("metadata") or {}).get("citation", {})
                         page_no  = cit.get("page_number")
 
-                        st.markdown(f"**Section {i} of {chunks}** — *{section}*")
-                        if page_no:
-                            st.caption(f"Page {page_no} of {cit.get('page_count', '?')}")
-                        st.text(content[:500] + ("…" if len(content) > 500 else ""))
-                        if tags:
-                            st.caption("Tags: " + ", ".join(f"`{t}`" for t in tags))
-                        if i < len(samples):
-                            st.divider()
-                else:
-                    st.caption("No preview available.")
+                        with st.container(border=True):
+                            chk_col, body_col = st.columns([1, 12])
+
+                            # Select checkbox for break-out
+                            with chk_col:
+                                is_sel = chunk_id in st.session_state[selected_key]
+                                if st.checkbox(
+                                    "select", value=is_sel,
+                                    key=f"chk_{chunk_id}",
+                                    label_visibility="collapsed",
+                                ):
+                                    st.session_state[selected_key].add(chunk_id)
+                                else:
+                                    st.session_state[selected_key].discard(chunk_id)
+
+                            with body_col:
+                                # Heading
+                                heading = section.split(" > ")[-1] if " > " in section else section
+                                st.markdown(f"**{heading}**")
+                                if " > " in section:
+                                    st.caption(section)
+                                if page_no:
+                                    st.caption(f"Page {page_no}")
+
+                                # Content (collapsed)
+                                with st.expander("Content", expanded=False):
+                                    st.text(content)
+
+                                # Tag editor
+                                tag_str = st.text_input(
+                                    "Tags",
+                                    value=", ".join(tags),
+                                    key=f"tags_{chunk_id}",
+                                    placeholder="tag1, tag2, …",
+                                )
+                                if st.button("💾 Save tags", key=f"save_tags_{chunk_id}"):
+                                    new_tags = [t.strip() for t in tag_str.split(",") if t.strip()]
+                                    rev.update_chunk(doc_id, chunk_id, {"tags": new_tags})
+                                    st.toast("Tags updated", icon="💾")
+                                    st.cache_data.clear()
+                                    st.rerun()
+
+                    # ── Break-out control ─────────────────────────────────
+                    selected_ids = list(st.session_state.get(selected_key, set()))
+                    if selected_ids:
+                        st.divider()
+                        st.caption(f"{len(selected_ids)} section(s) selected for break-out")
+                        new_title = st.text_input(
+                            "New document title",
+                            key=f"split_title_{doc_id}",
+                            placeholder=f"{title} — split",
+                        )
+                        if st.button(
+                            f"✂️  Break out {len(selected_ids)} section(s) into new document",
+                            key=f"split_{doc_id}",
+                            type="primary",
+                        ):
+                            if new_title.strip():
+                                new_id = rev.split_doc(doc_id, selected_ids, new_title.strip())
+                                if new_id:
+                                    st.toast(f"Created: {new_title.strip()}", icon="✂️")
+                                    st.session_state[selected_key] = set()
+                                    st.cache_data.clear()
+                                    st.rerun()
+                                else:
+                                    st.error("Break-out failed — source document not found.")
+                            else:
+                                st.warning("Enter a title for the new document.")
+
             except Exception as exc:
-                st.caption(f"Could not load preview: {exc}")
+                st.caption(f"Could not load sections: {exc}")
 
         # ── Row 5: action buttons ─────────────────────────────────────────
         btn_cols = st.columns([1, 1, 1, 3])
