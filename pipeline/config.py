@@ -79,10 +79,13 @@ class Settings:
     mongodb_username: str    = os.getenv("MONGODB_USERNAME", "")
     mongodb_password: str    = os.getenv("MONGODB_PASSWORD", "")
     mongodb_auth_source: str = os.getenv("MONGODB_AUTH_SOURCE", "")
-    mongodb_tls: bool        = os.getenv("MONGODB_TLS", "true").lower() not in ("0", "false", "no")
+    mongodb_tls: bool         = os.getenv("MONGODB_TLS", "true").lower() not in ("0", "false", "no")
+    # Skip TLS certificate verification — use when the server has a self-signed
+    # or internally-signed certificate that the client CA bundle doesn't trust.
+    mongodb_tls_insecure: bool = os.getenv("MONGODB_TLS_INSECURE", "false").lower() in ("1", "true", "yes")
     # Use mongodb+srv:// (DNS SRV discovery — required for Atlas, most cloud hosts).
     # Set to false for plain MongoDB with a direct host:port connection.
-    mongodb_srv: bool        = os.getenv("MONGODB_SRV", "true").lower() not in ("0", "false", "no")
+    mongodb_srv: bool         = os.getenv("MONGODB_SRV", "true").lower() not in ("0", "false", "no")
     mongodb_db_name: str     = os.getenv("MONGODB_DB_NAME", "knowledge_pipeline")
     # Prefix applied to every collection name — useful when sharing one DB
     # across multiple environments (e.g. "prod_" → prod_staging_docs).

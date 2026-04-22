@@ -69,6 +69,8 @@ def _build_uri() -> str:
     if not settings.mongodb_tls and not settings.mongodb_srv:
         # SRV connections always use TLS; only disable for plain mongodb:// URIs
         params.append("tls=false")
+    if settings.mongodb_tls_insecure:
+        params.append("tlsAllowInvalidCertificates=true")
 
     if params:
         uri += "?" + "&".join(params)
