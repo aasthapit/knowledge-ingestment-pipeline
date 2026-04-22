@@ -71,6 +71,8 @@ def _build_uri() -> str:
         params.append("tls=false")
     if settings.mongodb_tls_insecure:
         params.append("tlsAllowInvalidCertificates=true")
+    if settings.mongodb_auth_mechanism:
+        params.append(f"authMechanism={quote_plus(settings.mongodb_auth_mechanism)}")
 
     if params:
         uri += "?" + "&".join(params)

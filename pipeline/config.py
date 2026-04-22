@@ -78,7 +78,10 @@ class Settings:
     mongodb_port: int        = int(os.getenv("MONGODB_PORT", "27017"))
     mongodb_username: str    = os.getenv("MONGODB_USERNAME", "")
     mongodb_password: str    = os.getenv("MONGODB_PASSWORD", "")
-    mongodb_auth_source: str = os.getenv("MONGODB_AUTH_SOURCE", "")
+    mongodb_auth_source: str     = os.getenv("MONGODB_AUTH_SOURCE", "")
+    # e.g. SCRAM-SHA-256, SCRAM-SHA-1, PLAIN (LDAP), GSSAPI (Kerberos).
+    # Leave empty to let PyMongo negotiate automatically.
+    mongodb_auth_mechanism: str = os.getenv("MONGODB_AUTH_MECHANISM", "")
     mongodb_tls: bool         = os.getenv("MONGODB_TLS", "true").lower() not in ("0", "false", "no")
     # Skip TLS certificate verification — use when the server has a self-signed
     # or internally-signed certificate that the client CA bundle doesn't trust.
