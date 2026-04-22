@@ -1,22 +1,26 @@
-C4Context
-    title System Context — Knowledge Ingestion Pipeline
+# System Context — Knowledge Ingestion Pipeline
 
-    Person(engineer, "Knowledge Engineer", "Ingests documents, reviews quality, manages KB health")
-    Person_Ext(consumer, "AI Agent / App", "Queries the knowledge base for semantic retrieval")
+High-level view of who and what interacts with the pipeline.
 
-    System(pipeline, "Knowledge Ingestion Pipeline", "Converts, quality-gates, chunks, embeds, and stores documents in a searchable vector knowledge base")
+```mermaid
+graph TD
+    engineer["👤 Knowledge Engineer\nIngests documents, reviews quality,\nmanages KB health"]
+    consumer["👤 AI Agent / App\nQueries the knowledge base\nfor semantic retrieval"]
 
-    System_Ext(openai,     "OpenAI / Azure OpenAI",  "Generates text embedding vectors")
-    System_Ext(confluence, "Confluence",              "Source of structured wiki page trees")
-    System_Ext(mongodb,    "MongoDB",                 "Document staging queue and permanent KB ledger")
-    System_Ext(redis,      "Redis Stack",             "Default vector database (RediSearch)")
-    System_Ext(qdrant,     "Qdrant",                  "Alternative production vector database")
+    pipeline["⚙️ Knowledge Ingestion Pipeline\nConverts · quality-gates · chunks\nembeds · stores documents"]
 
-    Rel(engineer,  pipeline,   "Uploads files, reviews docs, searches KB", "Browser / CLI")
-    Rel(consumer,  redis,      "Semantic search queries",                  "RediSearch API")
-    Rel(consumer,  qdrant,     "Semantic search queries",                  "Qdrant HTTP/gRPC")
-    Rel(pipeline,  openai,     "Embed text chunks",                        "HTTPS REST")
-    Rel(pipeline,  confluence, "Crawl page trees",                         "Confluence REST API v1")
-    Rel(pipeline,  mongodb,    "Stage docs, track drift",                  "pymongo")
-    Rel(pipeline,  redis,      "Upsert and search vectors",                "redis-py")
-    Rel(pipeline,  qdrant,     "Upsert and search vectors",                "qdrant-client")
+    openai["OpenAI / Azure OpenAI\nGenerates text embedding vectors"]
+    confluence["Confluence\nSource of structured wiki page trees"]
+    mongodb[("MongoDB\nDocument staging queue\n& permanent KB ledger")]
+    redis[("Redis Stack\nDefault vector database\nRediSearch")]
+    qdrant[("Qdrant\nAlternative production\nvector database")]
+
+    engineer -->|"Browser / CLI — uploads files,\nreviews docs, searches KB"| pipeline
+    pipeline -->|"HTTPS REST — embed text chunks"| openai
+    pipeline -->|"Confluence REST API v1 — crawl page trees"| confluence
+    pipeline -->|"pymongo — stage docs, track drift"| mongodb
+    pipeline -->|"redis-py — upsert & search vectors"| redis
+    pipeline -->|"qdrant-client — upsert & search vectors"| qdrant
+    consumer -->|"RediSearch API — semantic search"| redis
+    consumer -->|"Qdrant HTTP/gRPC — semantic search"| qdrant
+```

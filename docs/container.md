@@ -1,30 +1,34 @@
-C4Container
-    title Container — Knowledge Ingestion Pipeline
+# Container — Knowledge Ingestion Pipeline
 
-    Person(engineer, "Knowledge Engineer")
-    Person_Ext(consumer, "AI Agent / App")
+Three-layer architecture: user interfaces, pipeline core, and data stores.
 
-    System_Boundary(sys, "Knowledge Ingestion Pipeline") {
-        Container(ui,   "Streamlit Web App", "Python / Streamlit 1.40+", "All user-facing workflows: ingest, Confluence import, review queue, search, KB health, status")
-        Container(cli,  "CLI Tool",          "Python / Click",           "Batch ingest, review, query — scriptable and CI-friendly")
-        Container(core, "Pipeline Core",     "Python library",           "Conversion, quality scoring, chunking, embedding, staging, push orchestration, drift detection")
-    }
+```mermaid
+graph TD
+    engineer["👤 Knowledge Engineer"]
+    consumer["👤 AI Agent / App"]
 
-    ContainerDb(mongo,    "MongoDB",      "MongoDB 7+",           "staging_docs · staging_chunks · kb_documents")
-    ContainerDb(redis_db, "Redis Stack",  "Redis + RediSearch",   "FLAT vector index on doc:* keys — cosine distance, 1536 dims")
-    ContainerDb(qdrant_db,"Qdrant",       "Qdrant HNSW",          "Cosine similarity collection — optional production backend")
+    subgraph pipeline["Knowledge Ingestion Pipeline"]
+        ui["Streamlit Web App\nPython / Streamlit 1.40+\nIngest · Confluence import · Review queue\nSearch · KB health · Status"]
+        cli["CLI Tool\nPython / Click\nBatch ingest · review · query\nScriptable & CI-friendly"]
+        core["Pipeline Core\nPython library\nConversion · quality scoring · chunking\nEmbedding · staging · push · drift detection"]
+    end
 
-    System_Ext(openai,     "OpenAI / Azure OpenAI")
-    System_Ext(confluence, "Confluence")
+    mongo[("MongoDB 7+\nstaging_docs\nstaging_chunks\nkb_documents")]
+    redis_db[("Redis Stack\nRedis + RediSearch\nFLAT vector index · cosine distance\n1536 dims")]
+    qdrant_db[("Qdrant HNSW\nCosine similarity\nOptional production backend")]
 
-    Rel(engineer,  ui,        "Uses",                          "HTTPS")
-    Rel(engineer,  cli,       "Uses",                          "Shell")
-    Rel(ui,        core,      "Calls pipeline functions")
-    Rel(cli,       core,      "Calls pipeline functions")
-    Rel(core,      mongo,     "Stage docs + chunks; read/write ledger", "pymongo TCP")
-    Rel(core,      redis_db,  "Upsert vectors; cosine search",          "RESP3")
-    Rel(core,      qdrant_db, "Upsert vectors; filtered search",        "gRPC / HTTP")
-    Rel(core,      openai,    "Embed chunks (batched)",                 "HTTPS REST")
-    Rel(core,      confluence,"Crawl page trees",                       "HTTPS REST")
-    Rel(consumer,  redis_db,  "Semantic search",                        "RediSearch API")
-    Rel(consumer,  qdrant_db, "Semantic search",                        "Qdrant API")
+    openai["OpenAI / Azure OpenAI"]
+    confluence["Confluence"]
+
+    engineer -->|HTTPS| ui
+    engineer -->|Shell| cli
+    ui -->|"Calls pipeline functions"| core
+    cli -->|"Calls pipeline functions"| core
+    core -->|"pymongo TCP\nStage docs + chunks; read/write ledger"| mongo
+    core -->|"RESP3\nUpsert vectors; cosine search"| redis_db
+    core -->|"gRPC / HTTP\nUpsert vectors; filtered search"| qdrant_db
+    core -->|"HTTPS REST\nEmbed chunks (batched)"| openai
+    core -->|"HTTPS REST\nCrawl page trees"| confluence
+    consumer -->|"RediSearch API\nSemantic search"| redis_db
+    consumer -->|"Qdrant API\nSemantic search"| qdrant_db
+```
