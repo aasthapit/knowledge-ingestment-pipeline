@@ -140,6 +140,10 @@ class ConfluenceCrawler:
         Atlassian API token (Cloud) or Personal Access Token (Server/DC).
     timeout:
         HTTP request timeout in seconds (default 30).
+    verify_ssl:
+        Set to False to skip SSL certificate verification.  Useful for
+        on-premise Confluence instances with self-signed certificates.
+        Defaults to True.
     """
 
     _API_V1 = "/wiki/rest/api"
@@ -151,6 +155,7 @@ class ConfluenceCrawler:
         email: str = "",
         api_token: str = "",
         timeout: int = 30,
+        verify_ssl: bool = True,
     ) -> None:
         self.base_url  = base_url.rstrip("/")
         self.auth_type = auth_type.lower()
@@ -158,6 +163,7 @@ class ConfluenceCrawler:
 
         self._session = requests.Session()
         self._session.headers.update({"Accept": "application/json"})
+        self._session.verify = verify_ssl
 
         if self.auth_type == "cloud":
             if not email or not api_token:

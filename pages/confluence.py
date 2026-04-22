@@ -54,6 +54,15 @@ api_token = st.text_input(
     ),
 )
 
+verify_ssl = not st.checkbox(
+    "Disable SSL certificate verification  *(self-signed / internal CA)*",
+    value=False,
+    help=(
+        "Tick this for on-premise Confluence instances that use a self-signed "
+        "or internally-signed certificate.  Do not use on public/cloud instances."
+    ),
+)
+
 # ── Page selection ────────────────────────────────────────────────────────────
 
 st.divider()
@@ -133,6 +142,7 @@ if st.button(
             auth_type="cloud" if is_cloud else "server",
             email=email.strip(),
             api_token=api_token.strip(),
+            verify_ssl=verify_ssl,
         )
     except Exception as exc:
         st.error(f"Could not initialise connector: {exc}")

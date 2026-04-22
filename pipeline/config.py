@@ -62,6 +62,9 @@ class Settings:
     docling_max_tokens: int = int(os.getenv("DOCLING_MAX_TOKENS", "512"))
 
     # ── MongoDB (staging store + KB ledger) ───────────────────────────────
+    # Set MONGODB_URI to use a full connection string (e.g. mongodb+srv://...).
+    # When set, the individual host/port/username/password/tls fields are ignored.
+    mongodb_uri: str         = os.getenv("MONGODB_URI", "")
     mongodb_host: str        = os.getenv("MONGODB_HOST", "localhost")
     mongodb_port: int        = int(os.getenv("MONGODB_PORT", "27017"))
     mongodb_username: str    = os.getenv("MONGODB_USERNAME", "")
