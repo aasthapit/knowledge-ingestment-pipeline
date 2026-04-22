@@ -8,6 +8,8 @@ from pathlib import Path
 
 import streamlit as st
 
+from pipeline.config import settings
+
 st.title("🔗 Confluence Import")
 st.caption(
     "Connect to Confluence, pick a parent page, and pull the entire page tree "
@@ -18,10 +20,17 @@ st.caption(
 
 st.subheader("Connection")
 
+_default_auth_type = (
+    "Cloud (API token)"
+    if settings.confluence_auth_type.lower() == "cloud"
+    else "Server / DC (PAT)"
+)
+
 col_url, col_type = st.columns([3, 1])
 with col_url:
     base_url = st.text_input(
         "Confluence base URL",
+        value=settings.confluence_base_url,
         placeholder="https://mycompany.atlassian.net",
         help="Root URL of your Confluence instance — no trailing slash.",
     )
@@ -29,6 +38,7 @@ with col_type:
     auth_type = st.selectbox(
         "Auth type",
         ["Cloud (API token)", "Server / DC (PAT)"],
+        index=0 if _default_auth_type == "Cloud (API token)" else 1,
         help=(
             "Cloud: email + API token from id.atlassian.com/manage-profile/security.\n"
             "Server/DC: Personal Access Token from your profile."
@@ -40,6 +50,7 @@ is_cloud = auth_type.startswith("Cloud")
 if is_cloud:
     email = st.text_input(
         "Atlassian account email",
+        value=settings.confluence_email,
         placeholder="you@example.com",
     )
 else:
@@ -47,6 +58,7 @@ else:
 
 api_token = st.text_input(
     "API token / Personal Access Token",
+    value=settings.confluence_api_token,
     type="password",
     help=(
         "Cloud: generate at id.atlassian.com → Security → API tokens.\n"
@@ -56,7 +68,7 @@ api_token = st.text_input(
 
 verify_ssl = not st.checkbox(
     "Disable SSL certificate verification  *(self-signed / internal CA)*",
-    value=False,
+    value=not settings.confluence_verify_ssl,
     help=(
         "Tick this for on-premise Confluence instances that use a self-signed "
         "or internally-signed certificate.  Do not use on public/cloud instances."

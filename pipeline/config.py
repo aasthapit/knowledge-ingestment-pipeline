@@ -61,6 +61,15 @@ class Settings:
     # Max tokens per chunk when using HybridChunker
     docling_max_tokens: int = int(os.getenv("DOCLING_MAX_TOKENS", "512"))
 
+    # ── Confluence ────────────────────────────────────────────────────────
+    confluence_base_url: str  = os.getenv("CONFLUENCE_BASE_URL", "")
+    confluence_auth_type: str = os.getenv("CONFLUENCE_AUTH_TYPE", "server")
+    confluence_email: str     = os.getenv("CONFLUENCE_EMAIL", "")
+    confluence_api_token: str = os.getenv("CONFLUENCE_API_TOKEN", "")
+    confluence_verify_ssl: bool = (
+        os.getenv("CONFLUENCE_VERIFY_SSL", "true").lower() not in ("0", "false", "no")
+    )
+
     # ── MongoDB (staging store + KB ledger) ───────────────────────────────
     # Set MONGODB_URI to use a full connection string (e.g. mongodb+srv://...).
     # When set, the individual host/port/username/password/tls fields are ignored.
