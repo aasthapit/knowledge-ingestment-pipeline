@@ -24,6 +24,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from typing import Any, Callable
+from urllib.parse import quote_plus
 
 from pymongo import MongoClient, ASCENDING, DESCENDING
 from pymongo.collection import Collection
@@ -40,29 +41,50 @@ logger = logging.getLogger(__name__)
 _client: MongoClient | None = None
 
 
+def _build_uri() -> str:
+    """
+    Build a MongoDB connection URI from individual settings fields.
+
+    Uses ``mongodb+srv://`` when ``MONGODB_SRV=true`` (default), which is
+    required for Atlas and most cloud-hosted clusters.  Set ``MONGODB_SRV=false``
+    for a plain ``mongodb://`` connection with an explicit host:port.
+    """
+    host = settings.mongodb_host
+
+    creds = ""
+    if settings.mongodb_username:
+        user = quote_plus(settings.mongodb_username)
+        pwd  = quote_plus(settings.mongodb_password) if settings.mongodb_password else ""
+        creds = f"{user}:{pwd}@" if pwd else f"{user}@"
+
+    if settings.mongodb_srv:
+        # SRV — no port in the URI (resolved from DNS)
+        uri = f"mongodb+srv://{creds}{host}/{settings.mongodb_db_name}"
+    else:
+        uri = f"mongodb://{creds}{host}:{settings.mongodb_port}/{settings.mongodb_db_name}"
+
+    params: list[str] = []
+    if settings.mongodb_auth_source:
+        params.append(f"authSource={quote_plus(settings.mongodb_auth_source)}")
+    if not settings.mongodb_tls and not settings.mongodb_srv:
+        # SRV connections always use TLS; only disable for plain mongodb:// URIs
+        params.append("tls=false")
+
+    if params:
+        uri += "?" + "&".join(params)
+
+    return uri
+
+
 def _get_client() -> MongoClient:
     global _client
     if _client is None:
         if settings.mongodb_uri:
             # Full URI supplied — use it directly, ignore individual fields
-            _client = MongoClient(
-                settings.mongodb_uri,
-                serverSelectionTimeoutMS=5000,
-            )
+            uri = settings.mongodb_uri
         else:
-            kwargs: dict[str, Any] = {
-                "host": settings.mongodb_host,
-                "port": settings.mongodb_port,
-                "serverSelectionTimeoutMS": 5000,
-                "tls": settings.mongodb_tls,
-            }
-            if settings.mongodb_username:
-                kwargs["username"] = settings.mongodb_username
-            if settings.mongodb_password:
-                kwargs["password"] = settings.mongodb_password
-            if settings.mongodb_auth_source:
-                kwargs["authSource"] = settings.mongodb_auth_source
-            _client = MongoClient(**kwargs)
+            uri = _build_uri()
+        _client = MongoClient(uri, serverSelectionTimeoutMS=5000)
     return _client
 
 

@@ -80,6 +80,9 @@ class Settings:
     mongodb_password: str    = os.getenv("MONGODB_PASSWORD", "")
     mongodb_auth_source: str = os.getenv("MONGODB_AUTH_SOURCE", "")
     mongodb_tls: bool        = os.getenv("MONGODB_TLS", "true").lower() not in ("0", "false", "no")
+    # Use mongodb+srv:// (DNS SRV discovery — required for Atlas, most cloud hosts).
+    # Set to false for plain MongoDB with a direct host:port connection.
+    mongodb_srv: bool        = os.getenv("MONGODB_SRV", "true").lower() not in ("0", "false", "no")
     mongodb_db_name: str     = os.getenv("MONGODB_DB_NAME", "knowledge_pipeline")
     # Prefix applied to every collection name — useful when sharing one DB
     # across multiple environments (e.g. "prod_" → prod_staging_docs).
