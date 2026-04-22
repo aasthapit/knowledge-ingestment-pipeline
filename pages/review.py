@@ -57,7 +57,11 @@ st.caption("Inspect documents before they go into the knowledge base. Approve or
 try:
     all_docs = _load_docs()
 except Exception as exc:
-    st.error(f"Could not connect to Redis: {exc}")
+    st.error(f"Could not load staged documents: {exc}")
+    st.caption(
+        "Check that MongoDB is reachable and that `MONGODB_URI` (or `MONGODB_HOST`) "
+        "is set correctly in your `.env` file."
+    )
     st.stop()
 
 pending  = [d for d in all_docs if d.get("status") == "pending_review"]
