@@ -27,18 +27,18 @@ The pipeline in this repo is the managed path. MongoDB serves as the **source of
 
 ```mermaid
 flowchart TD
-    A([URL / File / Confluence page]) --> B["converter.py\nDocling fetches & converts\nPDF · DOCX · PPTX · HTML · URL → Markdown + Citation"]
-    B --> C["quality.py\nScores 0–1\nHeadings · richness · metadata\nAuto-extracts tags from H1–H3"]
-    C --> D{Quality score\n≥ threshold?}
+    A([URL / File / Confluence page]) --> B["converter.py<br/>Docling fetches and converts<br/>PDF · DOCX · PPTX · HTML · URL → Markdown + Citation"]
+    B --> C["quality.py<br/>Scores 0–1<br/>Headings · richness · metadata<br/>Auto-extracts tags from H1–H3"]
+    C --> D{"Quality score<br/>≥ threshold?"}
     D -->|Yes — auto-approved| E["status = approved"]
     D -->|No — flagged| F["status = pending_review"]
-    E --> G["mongo_store.py\nstaging_docs + staging_chunks\nStored in MongoDB"]
+    E --> G["mongo_store.py<br/>staging_docs + staging_chunks<br/>Stored in MongoDB"]
     F --> G
-    G --> H["Review Queue\nStreamlit UI or CLI\napprove · reject · split · edit chunks"]
+    G --> H["Review Queue<br/>Streamlit UI or CLI<br/>approve · reject · split · edit chunks"]
     H --> I{Decision}
-    I -->|Approved| J["review.py — push_approved()\nEmbed chunks (or reuse pre-computed)\nUpsert to Redis / Qdrant"]
-    I -->|Rejected| K["status = rejected\nRemains in staging\nNever pushed"]
-    J --> L["KBLedger — kb_documents\nRecords chunk_ids · source_mtime · source_size\ndrift_status = current"]
+    I -->|Approved| J["review.py — push_approved()<br/>Embed chunks (or reuse pre-computed)<br/>Upsert to Redis / Qdrant"]
+    I -->|Rejected| K["status = rejected<br/>Remains in staging<br/>Never pushed"]
+    J --> L["KBLedger — kb_documents<br/>Records chunk_ids · source_mtime · source_size<br/>drift_status = current"]
     L --> M([Vector Store — searchable])
 ```
 
@@ -100,19 +100,19 @@ schemas:
 
 ```mermaid
 flowchart TD
-    A([JSONL file]) --> B["jsonl_importer.py\nRead first record"]
-    B --> C{Match custom schemas\nin order}
-    C -->|"required fields present\nexclude fields absent"| D["Apply matched schema\nmap fields → Chunk"]
+    A([JSONL file]) --> B["jsonl_importer.py<br/>Read first record"]
+    B --> C{"Match custom schemas<br/>in order"}
+    C -->|"required fields present<br/>exclude fields absent"| D["Apply matched schema<br/>map fields → Chunk"]
     C -->|No match| E{Built-in schemas}
     E -->|"has 'text' + 'page_url'"| F["Crawler schema"]
-    E -->|"has 'content' + 'source'"| G["Pipeline schema\n(this project's export format)"]
-    E -->|Nothing matched| H["Unknown — best-effort\nfield detection"]
-    D --> I["Chunk{chunk_id, source, title,\nsection, content, tags, metadata}"]
+    E -->|"has 'content' + 'source'"| G["Pipeline schema<br/>(this project's export format)"]
+    E -->|Nothing matched| H["Unknown — best-effort<br/>field detection"]
+    D --> I["Chunk{chunk_id, source, title,<br/>section, content, tags, metadata}"]
     F --> I
     G --> I
     H --> I
-    I --> J["tags = rec_tags + tags_static + extra_tags\n(order-preserving dedup)"]
-    J --> K["Enqueue as single staging_doc\nstatus = approved\nchunks → staging_chunks"]
+    I --> J["tags = rec_tags + tags_static + extra_tags<br/>(order-preserving dedup)"]
+    J --> K["Enqueue as single staging_doc<br/>status = approved<br/>chunks → staging_chunks"]
 ```
 
 The entire JSONL batch is stored as one `staging_doc` record, with each line becoming a row in `staging_chunks`. If the JSONL includes pre-computed `embedding` vectors, they are preserved in `_embedding` and reused at push time — no OpenAI call needed.
@@ -127,14 +127,14 @@ Labeling happens automatically during ingestion but can be refined in the review
 
 ```mermaid
 flowchart LR
-    A["quality.py\nAuto-tags from H1–H3 headings\n(up to 10 lowercase keywords)"]
-    B["schemas.yaml\ntags_static: [internal, v2]\n(always applied per schema)"]
-    C["CLI / API\nextra_tags passed at ingest time"]
-    D["Merge — order-preserving dedup\nrec_tags → tags_static → extra_tags"]
+    A["quality.py<br/>Auto-tags from H1–H3 headings<br/>(up to 10 lowercase keywords)"]
+    B["schemas.yaml<br/>tags_static: [internal, v2]<br/>(always applied per schema)"]
+    C["CLI / API<br/>extra_tags passed at ingest time"]
+    D["Merge — order-preserving dedup<br/>rec_tags → tags_static → extra_tags"]
     A --> D
     B --> D
     C --> D
-    D --> E["Chunk.tags stored\nin staging_chunks + vector store"]
+    D --> E["Chunk.tags stored<br/>in staging_chunks + vector store"]
 ```
 
 ### Review workflow
@@ -198,9 +198,9 @@ erDiagram
         string source_path
         string source_type
         float quality_score
-        bool quality_passed
-        list quality_flags
-        list suggested_tags
+        boolean quality_passed
+        string quality_flags
+        string suggested_tags
         string status
         string schema_type
         string kb_name
@@ -216,16 +216,16 @@ erDiagram
         string title
         string section
         string content
-        list tags
-        dict metadata
-        list _embedding
+        string tags
+        string metadata
+        string embedding
     }
     kb_documents {
         string _id PK
         string source_path
         string source_type
-        list chunk_ids
-        list tags
+        string chunk_ids
+        string tags
         float quality_score
         string kb_name
         datetime pushed_at
@@ -234,20 +234,20 @@ erDiagram
         int source_size
     }
     staging_docs ||--o{ staging_chunks : "has chunks"
-    staging_docs ..o| kb_documents : "becomes ledger entry on push"
+    staging_docs ||..o| kb_documents : "becomes ledger entry on push"
 ```
 
 ### Document lifecycle
 
 ```mermaid
 stateDiagram-v2
-    [*] --> pending_review : Quality score < threshold
-    [*] --> approved : Quality score ≥ threshold
+    [*] --> pending_review : Quality score below threshold
+    [*] --> approved : Quality score meets threshold
     pending_review --> approved : Engineer approves
     pending_review --> rejected : Engineer rejects
-    approved --> pushed : push_approved() — embedded & upserted to vector store
-    pushed --> [*] : staging_doc removed (default)\nledger entry persists in kb_documents
-    rejected --> [*] : Remains in staging\nnever pushed
+    approved --> pushed : push_approved() embeds and upserts to vector store
+    pushed --> [*] : Staging removed · ledger entry persists in kb_documents
+    rejected --> [*] : Remains in staging · never pushed
 ```
 
 ---
@@ -264,9 +264,9 @@ Any new ingest (URL, file, JSONL batch) creates new staging records. After appro
 
 ```mermaid
 flowchart LR
-    A["Engineer selects doc\nin KB Health page"] --> B["review.py — remove from ledger\nledger.remove_doc(doc_id)"]
-    B --> C["redis_store.delete_chunks(chunk_ids)\nor qdrant_store.delete_chunks(chunk_ids)"]
-    C --> D["Ledger entry deleted\nVector store chunks deleted"]
+    A["Engineer selects doc<br/>in KB Health page"] --> B["review.py — remove from ledger<br/>ledger.remove_doc(doc_id)"]
+    B --> C["redis_store.delete_chunks(chunk_ids)<br/>or qdrant_store.delete_chunks(chunk_ids)"]
+    C --> D["Ledger entry deleted<br/>Vector store chunks deleted"]
 ```
 
 Chunk IDs stored in `kb_documents.chunk_ids` make targeted deletion exact — only the pruned document's vectors are removed.
@@ -296,7 +296,7 @@ sequenceDiagram
     Drift-->>Engineer: Summary {current: N, stale: N, deleted: N, unknown: N}
     Engineer->>Drift: Re-ingest stale docs
     Drift->>Ingest: ingest_document(source_path) for each stale doc
-    Note over Ingest: New staging_doc created\nOld ledger entry replaced on push
+    Note over Ingest: New staging_doc created.<br/>Old ledger entry replaced on push.
 ```
 
 ### Reverting to a prior corpus state
@@ -309,12 +309,12 @@ The staging store is non-destructive by default (`remove_after_push=False` prese
 
 ```mermaid
 flowchart TD
-    A["Target rollback date: T"] --> B["Query kb_documents\nwhere pushed_at > T"]
-    B --> C["Collect chunk_ids from\npost-T documents"]
-    C --> D["Delete those chunk_ids\nfrom vector store"]
-    D --> E{Prior version\nin staging?}
-    E -->|Yes| F["Re-approve staging_doc\npush_approved(doc_id)"]
-    E -->|No| G["Re-ingest source\n(URL or file)"]
+    A["Target rollback date: T"] --> B["Query kb_documents<br/>where pushed_at > T"]
+    B --> C["Collect chunk_ids from<br/>post-T documents"]
+    C --> D["Delete those chunk_ids<br/>from vector store"]
+    D --> E{"Prior version<br/>in staging?"}
+    E -->|Yes| F["Re-approve staging_doc<br/>push_approved(doc_id)"]
+    E -->|No| G["Re-ingest source<br/>(URL or file)"]
     F --> H([Corpus restored to state at T])
     G --> H
 ```
