@@ -35,22 +35,38 @@ def _do_confluence_refresh(
     max_depth: int,
     extra_tags: list[str],
     source_id: str | None = None,
+    on_step: "Callable[[str], None] | None" = None,
 ) -> None:
     """
     Re-crawl registered Confluence pages for a usecase+agent pair, stage the
     content, and immediately push to the vector DB.
 
+    Uses incremental refresh when a prior crawl snapshot exists: only pages
+    whose version has changed (or that are new) are fully fetched.
+
     Reuses ConfluenceCrawler, ingest_jsonl, and push_approved — no new
     abstractions. The content is auto-pushed without human review because it
     originates from pages that were previously registered and reviewed.
     """
+    from typing import Callable
+
     from pipeline.config import settings
     from pipeline.confluence import ConfluenceCrawler
     from pipeline.ingest import ingest_jsonl
     from pipeline.review import push_approved
 
+    def _step(msg: str) -> None:
+        logger.info(msg)
+        if on_step:
+            on_step(msg)
+
     if not settings.confluence_base_url:
         raise RuntimeError("CONFLUENCE_BASE_URL is not configured.")
+
+    _step(
+        f"Embedding: {settings.embedding_provider} / {settings.embedding_model} "
+        f"({settings.embedding_dimensions}d, batch {settings.embed_batch_size})"
+    )
 
     crawler = ConfluenceCrawler(
         base_url=settings.confluence_base_url,
@@ -60,45 +76,79 @@ def _do_confluence_refresh(
         verify_ssl=settings.confluence_verify_ssl,
     )
 
+    # Load prior snapshot for incremental diff.
+    old_snapshot: dict[str, int] = {}
+    if source_id:
+        try:
+            from pipeline.mongo_store import get_usecase_ledger
+            snap = get_usecase_ledger().get_crawl_snapshot(source_id)
+            old_snapshot = {p["page_id"]: p["version"] for p in snap}
+            if old_snapshot:
+                _step(f"Prior snapshot: {len(old_snapshot)} page(s) — will skip unchanged.")
+        except Exception as exc:
+            logger.warning("Could not load crawl snapshot: %s", exc)
+
     all_pages = []
+    full_metadata: list[dict] = []   # current page list across all root URLs
+
     for page_url in page_urls:
         try:
-            pages = crawler.crawl(
-                page_url=page_url,
-                max_depth=max_depth,
-                extra_tags=extra_tags,
-            )
+            _step(f"Discovering page tree from {page_url} …")
+            meta = crawler.crawl_metadata(page_url, max_depth=max_depth)
+            full_metadata.extend(meta)
+
+            if old_snapshot:
+                # Incremental: only fetch pages that are new or version-bumped.
+                changed = [
+                    m["page_id"] for m in meta
+                    if old_snapshot.get(m["page_id"]) != m["version"]
+                ]
+                skipped = len(meta) - len(changed)
+                if skipped:
+                    _step(f"Skipping {skipped} unchanged page(s).")
+                if not changed:
+                    _step("No changes detected for this URL — skipping full fetch.")
+                    continue
+                _step(f"Fetching {len(changed)} changed/new page(s) …")
+                pages = crawler.fetch_pages_by_ids(changed, extra_tags=extra_tags)
+            else:
+                # First run: full crawl.
+                _step(f"First crawl — fetching all {len(meta)} page(s) …")
+                pages = crawler.fetch_pages_by_ids(
+                    [m["page_id"] for m in meta], extra_tags=extra_tags
+                )
+
             all_pages.extend(pages)
         except Exception as exc:
             logger.warning("Could not crawl %s: %s", page_url, exc)
 
-    if not all_pages:
-        logger.warning(
-            "No pages retrieved for usecase=%s agent=%s", usecase_id, agent_filter
-        )
-        return
-
-    # Store page snapshot for drift tracking (page_id + version per page).
-    if source_id:
+    # Update snapshot with current metadata (all pages, not just changed ones).
+    if source_id and full_metadata:
         try:
             from pipeline.mongo_store import get_usecase_ledger
             snapshot = [
                 {
-                    "page_id":       p.page_id,
-                    "title":         p.title,
-                    "version":       p.version,
-                    "last_modified": p.last_modified,
+                    "page_id":       m["page_id"],
+                    "title":         m["title"],
+                    "version":       m["version"],
+                    "last_modified": m["last_modified"],
                 }
-                for p in all_pages
+                for m in full_metadata
             ]
             get_usecase_ledger().record_crawl_snapshot(source_id, snapshot)
         except Exception as exc:
             logger.warning("Could not store page snapshot: %s", exc)
 
+    if not all_pages:
+        _step("No new or changed pages to ingest.")
+        logger.warning(
+            "No pages retrieved for usecase=%s agent=%s", usecase_id, agent_filter
+        )
+        return
+
+    _step(f"Staging {len(all_pages)} page(s) to MongoDB …")
+
     # Convert pages to JSONL bytes using the existing pipeline-schema format.
-    # usecase_id and agent_filter are passed as parameters (not embedded in
-    # each record) because ConfluenceCrawler.to_record() produces pipeline-schema
-    # records which don't carry these fields.
     jsonl_lines = [
         json.dumps(crawler.to_record(p), ensure_ascii=False)
         for p in all_pages
@@ -115,7 +165,14 @@ def _do_confluence_refresh(
         agent_filter=agent_filter,
     )
 
+    _step(
+        f"Embedding {result['total_chunks']} chunk(s) → "
+        f"pushing to Redis index '{settings.redis_index_name}' …"
+    )
     push_result = push_approved(doc_id=result["doc_id"], remove_after_push=False)
+    _step(
+        f"Done — {push_result.get('pushed_chunks', 0)} chunk(s) upserted into Redis."
+    )
     logger.info(
         "Refresh complete for usecase=%s agent=%s: %d chunks pushed (%s)",
         usecase_id, agent_filter, result["total_chunks"], push_result,
@@ -214,11 +271,20 @@ def stop_scheduler() -> None:
             logger.info("Confluence refresh scheduler stopped.")
 
 
-def trigger_refresh_now(usecase_id: str, agent_filter: str) -> None:
+def trigger_refresh_now(
+    usecase_id: str,
+    agent_filter: str,
+    on_step: "Callable[[str], None] | None" = None,
+) -> None:
     """
     Manually trigger an immediate refresh for a specific usecase+agent pair.
     Runs synchronously in the calling thread (used by the UI 'Refresh now' button).
+
+    on_step: optional callback invoked with a human-readable status string at
+             each major step — useful for surfacing progress in the UI.
     """
+    from typing import Callable  # noqa: F401 (used in annotation above)
+
     from pipeline.mongo_store import get_usecase_ledger
 
     uc_ledger = get_usecase_ledger()
@@ -246,6 +312,7 @@ def trigger_refresh_now(usecase_id: str, agent_filter: str) -> None:
             max_depth=max_depth,
             extra_tags=extra_tags,
             source_id=source_id,
+            on_step=on_step,
         )
         uc_ledger.mark_refresh_done(source_id)
         if cron_expr:

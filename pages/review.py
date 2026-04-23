@@ -232,170 +232,195 @@ for doc in visible_docs:
                 if not all_chunks:
                     st.caption("No sections available.")
                 else:
-                    total_pages = max(1, math.ceil(len(all_chunks) / _PAGE_SIZE))
-                    page        = min(st.session_state[page_key], total_pages - 1)
-                    st.session_state[page_key] = page
-                    page_chunks = all_chunks[page * _PAGE_SIZE : (page + 1) * _PAGE_SIZE]
+                    chunk_filter = st.segmented_control(
+                        "Show",
+                        ["All", "Issues", "Clean"],
+                        default="All",
+                        key=f"cf_{doc_id}",
+                    )
+                    if chunk_filter == "Issues":
+                        all_chunks = [
+                            c for c in all_chunks
+                            if (c.get("metadata") or {}).get("quality_flags", [])
+                        ]
+                    elif chunk_filter == "Clean":
+                        all_chunks = [
+                            c for c in all_chunks
+                            if not (c.get("metadata") or {}).get("quality_flags", [])
+                        ]
 
-                    # ── Pagination controls ───────────────────────────────
-                    pc1, pc2, pc3 = st.columns([1, 3, 1])
-                    with pc1:
-                        if st.button("← Prev", key=f"prev_{doc_id}", disabled=page == 0,
-                                     width="stretch"):
-                            st.session_state[page_key] = page - 1
-                            st.rerun()
-                    with pc2:
-                        start = page * _PAGE_SIZE + 1
-                        end   = min(start + _PAGE_SIZE - 1, len(all_chunks))
+                    if not all_chunks:
                         st.caption(
-                            f"Sections {start}–{end} of {len(all_chunks)}"
-                            + (f"  ·  page {page + 1}/{total_pages}" if total_pages > 1 else "")
+                            f"No {'issue' if chunk_filter == 'Issues' else 'clean'} sections."
                         )
-                    with pc3:
-                        if st.button("Next →", key=f"next_{doc_id}",
-                                     disabled=page >= total_pages - 1,
-                                     width="stretch"):
-                            st.session_state[page_key] = page + 1
-                            st.rerun()
+                    else:
+                        total_pages = max(1, math.ceil(len(all_chunks) / _PAGE_SIZE))
+                        page        = min(st.session_state[page_key], total_pages - 1)
+                        st.session_state[page_key] = page
+                        page_chunks = all_chunks[page * _PAGE_SIZE : (page + 1) * _PAGE_SIZE]
 
-                    # ── Section rows ──────────────────────────────────────
-                    for chunk in page_chunks:
-                        chunk_id = chunk.get("chunk_id", "")
-                        section  = chunk.get("section", "—")
-                        content  = chunk.get("content", "")
-                        tags     = chunk.get("tags", [])
-                        cit      = (chunk.get("metadata") or {}).get("citation", {})
-                        page_no  = cit.get("page_number")
+                        # ── Pagination controls ───────────────────────────────
+                        pc1, pc2, pc3 = st.columns([1, 3, 1])
+                        with pc1:
+                            if st.button("← Prev", key=f"prev_{doc_id}", disabled=page == 0,
+                                         width="stretch"):
+                                st.session_state[page_key] = page - 1
+                                st.rerun()
+                        with pc2:
+                            start = page * _PAGE_SIZE + 1
+                            end   = min(start + _PAGE_SIZE - 1, len(all_chunks))
+                            st.caption(
+                                f"Sections {start}–{end} of {len(all_chunks)}"
+                                + (f"  ·  page {page + 1}/{total_pages}" if total_pages > 1 else "")
+                            )
+                        with pc3:
+                            if st.button("Next →", key=f"next_{doc_id}",
+                                         disabled=page >= total_pages - 1,
+                                         width="stretch"):
+                                st.session_state[page_key] = page + 1
+                                st.rerun()
 
-                        with st.container(border=True):
-                            chk_col, body_col = st.columns([1, 12])
+                        # ── Section rows ──────────────────────────────────────
+                        for chunk in page_chunks:
+                            chunk_id  = chunk.get("chunk_id", "")
+                            section   = chunk.get("section", "—")
+                            content   = chunk.get("content", "")
+                            tags      = chunk.get("tags", [])
+                            cit       = (chunk.get("metadata") or {}).get("citation", {})
+                            page_no   = cit.get("page_number")
+                            chk_flags = (chunk.get("metadata") or {}).get("quality_flags", [])
 
-                            # Select checkbox for break-out
-                            with chk_col:
-                                is_sel = chunk_id in st.session_state[selected_key]
-                                if st.checkbox(
-                                    "select", value=is_sel,
-                                    key=f"chk_{chunk_id}",
-                                    label_visibility="collapsed",
-                                ):
-                                    st.session_state[selected_key].add(chunk_id)
-                                else:
-                                    st.session_state[selected_key].discard(chunk_id)
+                            with st.container(border=True):
+                                chk_col, body_col = st.columns([1, 12])
 
-                            with body_col:
-                                # Heading
-                                heading = section.split(" > ")[-1] if " > " in section else section
-                                st.markdown(f"**{heading}**")
-                                if " > " in section:
-                                    st.caption(section)
-                                if page_no:
-                                    st.caption(f"Page {page_no}")
-
-                                # Content (collapsed) — editable
-                                with st.expander("Content", expanded=False):
-                                    edited = st.text_area(
-                                        "Edit content",
-                                        value=content,
-                                        height=200,
-                                        key=f"content_{chunk_id}",
+                                # Select checkbox for break-out
+                                with chk_col:
+                                    is_sel = chunk_id in st.session_state[selected_key]
+                                    if st.checkbox(
+                                        "select", value=is_sel,
+                                        key=f"chk_{chunk_id}",
                                         label_visibility="collapsed",
-                                    )
-                                    c1, c2 = st.columns(2)
-                                    with c1:
-                                        if st.button("💾 Save content", key=f"save_content_{chunk_id}"):
-                                            rev.update_chunk(doc_id, chunk_id, {"content": edited.strip()})
-                                            st.toast("Content updated", icon="💾")
-                                            st.cache_data.clear()
-                                            st.rerun()
-                                    with c2:
-                                        if st.button("🧹 Clean formatting", key=f"clean_{chunk_id}"):
-                                            cleaned = _clean_content(edited)
-                                            rev.update_chunk(doc_id, chunk_id, {"content": cleaned})
-                                            st.toast("Formatting cleaned", icon="🧹")
-                                            st.cache_data.clear()
-                                            st.rerun()
+                                    ):
+                                        st.session_state[selected_key].add(chunk_id)
+                                    else:
+                                        st.session_state[selected_key].discard(chunk_id)
 
-                                    with st.expander("✂️ Split into subchunks", expanded=False):
-                                        split_mode = st.radio(
-                                            "Split by",
-                                            ["Blank lines (\\n\\n)", "Character limit"],
-                                            key=f"smode_{chunk_id}",
-                                            horizontal=True,
+                                with body_col:
+                                    # Heading
+                                    heading = section.split(" > ")[-1] if " > " in section else section
+                                    st.markdown(f"**{heading}**")
+                                    if " > " in section:
+                                        st.caption(section)
+                                    if page_no:
+                                        st.caption(f"Page {page_no}")
+                                    if chk_flags:
+                                        st.caption("⚠️ " + "  ·  ".join(chk_flags))
+
+                                    # Content (collapsed) — editable
+                                    with st.expander("Content", expanded=False):
+                                        edited = st.text_area(
+                                            "Edit content",
+                                            value=content,
+                                            height=200,
+                                            key=f"content_{chunk_id}",
+                                            label_visibility="collapsed",
                                         )
-                                        max_chars = 1000
-                                        if "Character limit" in split_mode:
-                                            max_chars = st.number_input(
-                                                "Max chars", 200, 5000, 1000,
-                                                key=f"maxc_{chunk_id}",
-                                            )
+                                        c1, c2 = st.columns(2)
+                                        with c1:
+                                            if st.button("💾 Save content", key=f"save_content_{chunk_id}"):
+                                                rev.update_chunk(doc_id, chunk_id, {"content": edited.strip()})
+                                                st.toast("Content updated", icon="💾")
+                                                st.cache_data.clear()
+                                                st.rerun()
+                                        with c2:
+                                            if st.button("🧹 Clean formatting", key=f"clean_{chunk_id}"):
+                                                cleaned = _clean_content(edited)
+                                                rev.update_chunk(doc_id, chunk_id, {"content": cleaned})
+                                                st.toast("Formatting cleaned", icon="🧹")
+                                                st.cache_data.clear()
+                                                st.rerun()
 
-                                        if st.button("Preview", key=f"prev_{chunk_id}"):
-                                            parts = (
-                                                _split_by_delimiter(edited)
-                                                if "Blank" in split_mode
-                                                else _split_large_chunk(edited, max_chars, 0)
+                                        with st.expander("✂️ Split into subchunks", expanded=False):
+                                            split_mode = st.radio(
+                                                "Split by",
+                                                ["Blank lines (\\n\\n)", "Character limit"],
+                                                key=f"smode_{chunk_id}",
+                                                horizontal=True,
                                             )
-                                            st.caption(f"{len(parts)} part(s)")
-                                            for i, p in enumerate(parts):
-                                                st.text(f"[{i + 1}] {p[:120]}{'…' if len(p) > 120 else ''}")
+                                            max_chars = 1000
+                                            if "Character limit" in split_mode:
+                                                max_chars = st.number_input(
+                                                    "Max chars", 200, 5000, 1000,
+                                                    key=f"maxc_{chunk_id}",
+                                                )
 
-                                        if st.button("✅ Confirm split", key=f"conf_{chunk_id}", type="primary"):
-                                            parts = (
-                                                _split_by_delimiter(edited)
-                                                if "Blank" in split_mode
-                                                else _split_large_chunk(edited, max_chars, 0)
-                                            )
-                                            if len(parts) < 2:
-                                                st.warning("Need at least 2 parts to split. Use Save Content instead.")
-                                            else:
-                                                new_ids = rev.split_chunk(doc_id, chunk_id, parts)
-                                                if new_ids:
-                                                    st.toast(f"Split into {len(new_ids)} subchunks", icon="✂️")
-                                                    st.cache_data.clear()
-                                                    st.rerun()
+                                            if st.button("Preview", key=f"prev_{chunk_id}"):
+                                                parts = (
+                                                    _split_by_delimiter(edited)
+                                                    if "Blank" in split_mode
+                                                    else _split_large_chunk(edited, max_chars, 0)
+                                                )
+                                                st.caption(f"{len(parts)} part(s)")
+                                                for i, p in enumerate(parts):
+                                                    st.text(f"[{i + 1}] {p[:120]}{'…' if len(p) > 120 else ''}")
+
+                                            if st.button("✅ Confirm split", key=f"conf_{chunk_id}", type="primary"):
+                                                parts = (
+                                                    _split_by_delimiter(edited)
+                                                    if "Blank" in split_mode
+                                                    else _split_large_chunk(edited, max_chars, 0)
+                                                )
+                                                if len(parts) < 2:
+                                                    st.warning("Need at least 2 parts to split. Use Save Content instead.")
                                                 else:
-                                                    st.error("Split failed — chunk not found.")
+                                                    new_ids = rev.split_chunk(doc_id, chunk_id, parts)
+                                                    if new_ids:
+                                                        st.toast(f"Split into {len(new_ids)} subchunks", icon="✂️")
+                                                        st.cache_data.clear()
+                                                        st.rerun()
+                                                    else:
+                                                        st.error("Split failed — chunk not found.")
 
-                                # Tag editor
-                                tag_str = st.text_input(
-                                    "Tags",
-                                    value=", ".join(tags),
-                                    key=f"tags_{chunk_id}",
-                                    placeholder="tag1, tag2, …",
-                                )
-                                if st.button("💾 Save tags", key=f"save_tags_{chunk_id}"):
-                                    new_tags = [t.strip() for t in tag_str.split(",") if t.strip()]
-                                    rev.update_chunk(doc_id, chunk_id, {"tags": new_tags})
-                                    st.toast("Tags updated", icon="💾")
-                                    st.cache_data.clear()
-                                    st.rerun()
+                                    # Tag editor
+                                    tag_str = st.text_input(
+                                        "Tags",
+                                        value=", ".join(tags),
+                                        key=f"tags_{chunk_id}",
+                                        placeholder="tag1, tag2, …",
+                                    )
+                                    if st.button("💾 Save tags", key=f"save_tags_{chunk_id}"):
+                                        new_tags = [t.strip() for t in tag_str.split(",") if t.strip()]
+                                        rev.update_chunk(doc_id, chunk_id, {"tags": new_tags})
+                                        st.toast("Tags updated", icon="💾")
+                                        st.cache_data.clear()
+                                        st.rerun()
 
-                    # ── Break-out control ─────────────────────────────────
-                    selected_ids = list(st.session_state.get(selected_key, set()))
-                    if selected_ids:
-                        st.divider()
-                        st.caption(f"{len(selected_ids)} section(s) selected for break-out")
-                        new_title = st.text_input(
-                            "New document title",
-                            key=f"split_title_{doc_id}",
-                            placeholder=f"{title} — split",
-                        )
-                        if st.button(
-                            f"✂️  Break out {len(selected_ids)} section(s) into new document",
-                            key=f"split_{doc_id}",
-                            type="primary",
-                        ):
-                            if new_title.strip():
-                                new_id = rev.split_doc(doc_id, selected_ids, new_title.strip())
-                                if new_id:
-                                    st.toast(f"Created: {new_title.strip()}", icon="✂️")
-                                    st.session_state[selected_key] = set()
-                                    st.cache_data.clear()
-                                    st.rerun()
+                        # ── Break-out control ─────────────────────────────────
+                        selected_ids = list(st.session_state.get(selected_key, set()))
+                        if selected_ids:
+                            st.divider()
+                            st.caption(f"{len(selected_ids)} section(s) selected for break-out")
+                            new_title = st.text_input(
+                                "New document title",
+                                key=f"split_title_{doc_id}",
+                                placeholder=f"{title} — split",
+                            )
+                            if st.button(
+                                f"✂️  Break out {len(selected_ids)} section(s) into new document",
+                                key=f"split_{doc_id}",
+                                type="primary",
+                            ):
+                                if new_title.strip():
+                                    new_id = rev.split_doc(doc_id, selected_ids, new_title.strip())
+                                    if new_id:
+                                        st.toast(f"Created: {new_title.strip()}", icon="✂️")
+                                        st.session_state[selected_key] = set()
+                                        st.cache_data.clear()
+                                        st.rerun()
+                                    else:
+                                        st.error("Break-out failed — source document not found.")
                                 else:
-                                    st.error("Break-out failed — source document not found.")
-                            else:
-                                st.warning("Enter a title for the new document.")
+                                    st.warning("Enter a title for the new document.")
 
             except Exception as exc:
                 st.caption(f"Could not load sections: {exc}")

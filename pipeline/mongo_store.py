@@ -1003,6 +1003,24 @@ class UsecaseLedger:
             upsert=True,
         )
 
+    def add_url_to_confluence_source(
+        self, usecase_id: str, agent_filter: str, url: str
+    ) -> None:
+        """Add a single URL to the page_urls list for a source (no-op if already present)."""
+        self._sources.update_one(
+            {"usecase_id": usecase_id, "agent_filter": agent_filter},
+            {"$addToSet": {"page_urls": url}},
+        )
+
+    def remove_url_from_confluence_source(
+        self, usecase_id: str, agent_filter: str, url: str
+    ) -> None:
+        """Remove a single URL from the page_urls list for a source."""
+        self._sources.update_one(
+            {"usecase_id": usecase_id, "agent_filter": agent_filter},
+            {"$pull": {"page_urls": url}},
+        )
+
     def get_confluence_source(
         self, usecase_id: str, agent_filter: str
     ) -> dict[str, Any] | None:

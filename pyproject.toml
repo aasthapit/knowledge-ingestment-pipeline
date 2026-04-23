@@ -14,6 +14,7 @@ dependencies = [
     # Document conversion
     "docling==2.88.0",
     "docling-core==2.73.0",
+    "docling-ibm-models==3.13.0",
     # Vector stores
     "redis[hiredis]>=5.0.3",
     "qdrant-client>=1.9.0",
@@ -31,4 +32,19 @@ dependencies = [
     # Confluence refresh scheduler
     "apscheduler>=3.10.0",
     "croniter>=2.0.0",
+]
+
+[tool.uv]
+# Security gate: all pinned versions must have been published >7 days ago (re-evaluate after 2026-04-30)
+constraint-dependencies = [
+    "cachetools==7.0.5",
+    "faker==40.13.0",
+    "filelock==3.28.0",
+    "huggingface-hub==1.10.2",
+    "narwhals==2.19.0",
+    "pydantic==2.13.1",
+    "pydantic-core==2.46.1",
+    "pydantic-settings==2.13.1",
+    "pydeck==0.9.1",
+    "pypdfium2==5.7.0",
 ]

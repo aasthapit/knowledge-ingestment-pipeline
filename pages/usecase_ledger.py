@@ -211,14 +211,16 @@ with tab_ledger:
                 rc1, rc2 = st.columns([1, 4])
                 with rc1:
                     if st.button("Refresh now", key="health_refresh_btn"):
-                        with st.spinner("Refreshing…"):
-                            try:
-                                from pipeline.refresh_scheduler import trigger_refresh_now
-                                trigger_refresh_now(sel_usecase, sel_agent)
-                                st.success("Refresh complete.")
-                                st.cache_data.clear()
-                            except Exception as exc:
-                                st.error(f"Refresh failed: {exc}")
+                        try:
+                            from pipeline.refresh_scheduler import trigger_refresh_now
+                            with st.status("Refreshing…", expanded=True) as _st:
+                                trigger_refresh_now(
+                                    sel_usecase, sel_agent, on_step=st.write
+                                )
+                                _st.update(label="Refresh complete", state="complete")
+                            st.cache_data.clear()
+                        except Exception as exc:
+                            st.error(f"Refresh failed: {exc}")
             else:
                 st.info(
                     "No Confluence source registered for this use case. "
@@ -335,6 +337,92 @@ with tab_sources:
             hide_index=True,
         )
 
+        # ── Per-source URL manager ────────────────────────────────────────────
+
+        st.divider()
+        st.subheader("Manage URLs")
+        st.caption("Add or remove individual Confluence root URLs for a registered source.")
+
+        url_mgr_options = [f"{s['usecase_id']} / {s['agent_filter']}" for s in sources]
+        url_mgr_sel = st.selectbox(
+            "Source", url_mgr_options,
+            key="url_mgr_sel", label_visibility="collapsed",
+        )
+        url_mgr_idx = url_mgr_options.index(url_mgr_sel)
+        url_mgr_source = sources[url_mgr_idx]
+        url_mgr_urls = url_mgr_source.get("page_urls") or []
+
+        if url_mgr_urls:
+            for url in url_mgr_urls:
+                u_col, btn_col = st.columns([8, 1])
+                u_col.code(url, language=None)
+                if btn_col.button("Remove", key=f"rm_url_{url}"):
+                    try:
+                        from pipeline.mongo_store import get_usecase_ledger
+                        get_usecase_ledger().remove_url_from_confluence_source(
+                            url_mgr_source["usecase_id"],
+                            url_mgr_source["agent_filter"],
+                            url,
+                        )
+                        st.toast("URL removed.", icon="🗑️")
+                        st.cache_data.clear()
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Could not remove URL: {exc}")
+        else:
+            st.caption("No URLs registered for this source.")
+
+        add_col, add_btn_col = st.columns([8, 1])
+        new_url = add_col.text_input(
+            "Add URL",
+            placeholder="https://…",
+            key="url_mgr_add_input",
+            label_visibility="collapsed",
+        )
+        if add_btn_col.button("Add", key="url_mgr_add_btn"):
+            if new_url.strip():
+                try:
+                    from pipeline.mongo_store import get_usecase_ledger
+                    get_usecase_ledger().add_url_to_confluence_source(
+                        url_mgr_source["usecase_id"],
+                        url_mgr_source["agent_filter"],
+                        new_url.strip(),
+                    )
+                    st.toast("URL added.", icon="✅")
+                    st.cache_data.clear()
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Could not add URL: {exc}")
+            else:
+                st.warning("Enter a URL to add.")
+
+        # ── Embedding & vector DB config ──────────────────────────────────────
+
+        st.divider()
+        with st.expander("Embedding & vector DB config"):
+            from pipeline.config import settings as _cfg
+            col_emb, col_db = st.columns(2)
+            with col_emb:
+                st.markdown("**Embedding**")
+                st.caption(f"Provider: `{_cfg.embedding_provider}`")
+                st.caption(f"Model: `{_cfg.embedding_model}`")
+                st.caption(f"Dimensions: `{_cfg.embedding_dimensions}`")
+                st.caption(f"Batch size: `{_cfg.embed_batch_size}` chunks/call")
+                if _cfg.embedding_provider == "custom":
+                    st.caption(f"Endpoint: `{_cfg.embedding_custom_url}`")
+                elif _cfg.embedding_provider == "azure":
+                    st.caption(f"Deployment: `{_cfg.azure_openai_deployment}`")
+            with col_db:
+                st.markdown("**Vector DB (Redis)**")
+                _url = _cfg.redis_url
+                # Mask password in displayed URL
+                import re as _re
+                _url_display = _re.sub(r":[^:@/]+@", ":***@", _url)
+                st.caption(f"URL: `{_url_display}`")
+                st.caption(f"Index: `{_cfg.redis_index_name}`")
+                st.caption(f"Key prefix: `{_cfg.redis_key_prefix}`")
+                st.caption("Algorithm: `FLAT` (brute-force cosine, stored as JSON)")
+
         # ── Manual refresh trigger ────────────────────────────────────────────
 
         st.caption("Trigger an immediate refresh for a registered source:")
@@ -349,14 +437,18 @@ with tab_sources:
             if st.button("Refresh now", key="trig_btn"):
                 idx = trig_options.index(trig_sel)
                 chosen = sources[idx]
-                with st.spinner(f"Refreshing {trig_sel} …"):
-                    try:
-                        from pipeline.refresh_scheduler import trigger_refresh_now
-                        trigger_refresh_now(chosen["usecase_id"], chosen["agent_filter"])
-                        st.success("Refresh complete.")
-                        st.cache_data.clear()
-                    except Exception as exc:
-                        st.error(f"Refresh failed: {exc}")
+                try:
+                    from pipeline.refresh_scheduler import trigger_refresh_now
+                    with st.status(f"Refreshing {trig_sel} …", expanded=True) as _st:
+                        trigger_refresh_now(
+                            chosen["usecase_id"],
+                            chosen["agent_filter"],
+                            on_step=st.write,
+                        )
+                        _st.update(label="Refresh complete", state="complete")
+                    st.cache_data.clear()
+                except Exception as exc:
+                    st.error(f"Refresh failed: {exc}")
 
         # ── Drift check ───────────────────────────────────────────────────────
 
@@ -466,9 +558,25 @@ with tab_sources:
                                             f"*(last modified: {new['last_modified'][:10] if new['last_modified'] else '?'})*"
                                         )
 
-                            st.info(
-                                "Run **Refresh now** above to re-crawl and re-ingest the updated content."
-                            )
+                            n_to_ingest = len(drift["added"]) + len(drift["changed"])
+                            if n_to_ingest:
+                                if st.button(
+                                    f"🚀 Queue {n_to_ingest} page(s) for re-ingestion",
+                                    type="primary",
+                                    key="queue_ingest_btn",
+                                ):
+                                    try:
+                                        from pipeline.refresh_scheduler import trigger_refresh_now
+                                        with st.status("Re-ingesting changed pages …", expanded=True) as _st:
+                                            trigger_refresh_now(
+                                                chosen["usecase_id"],
+                                                chosen["agent_filter"],
+                                                on_step=st.write,
+                                            )
+                                            _st.update(label="Re-ingest complete", state="complete")
+                                        st.cache_data.clear()
+                                    except Exception as exc:
+                                        st.error(f"Re-ingest failed: {exc}")
 
         if any(s.get("refresh_error") for s in sources):
             with st.expander("Refresh errors"):

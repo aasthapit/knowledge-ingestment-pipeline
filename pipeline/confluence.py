@@ -335,6 +335,34 @@ class ConfluenceCrawler:
         logger.info("Crawled %d pages successfully.", len(pages))
         return pages
 
+    def fetch_pages_by_ids(
+        self,
+        page_ids: list[str],
+        extra_tags: list[str] | None = None,
+    ) -> list[ConfluencePage]:
+        """
+        Fetch full content for a specific list of page IDs.
+
+        Used by the incremental refresh path to avoid re-fetching unchanged
+        pages: call crawl_metadata() first, diff against the stored snapshot,
+        then pass only the changed/new page IDs here.
+        """
+        extra_tags = extra_tags or []
+        pages: list[ConfluencePage] = []
+        for pid in page_ids:
+            try:
+                raw  = self._get_page(pid)
+                page = self._parse_page(raw)
+                page.labels.extend(t for t in extra_tags if t not in page.labels)
+                if page.content_text.strip():
+                    pages.append(page)
+                else:
+                    logger.debug("Skipping empty page %s (%s)", pid, page.title)
+            except Exception as exc:
+                logger.warning("Could not fetch page %s: %s", pid, exc)
+        logger.info("Fetched %d/%d pages.", len(pages), len(page_ids))
+        return pages
+
     def crawl_metadata(
         self,
         page_url: str,
