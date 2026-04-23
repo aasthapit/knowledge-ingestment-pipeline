@@ -1,5 +1,4 @@
-import { useState } from "react"
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
+import { useState, useEffect } from "react"
 import { FolderGit2, ChevronDown, ChevronRight } from "lucide-react"
 import { listManifests, getManifest, freezeManifest, snapshotManifest, diffManifests } from "@/lib/api"
 import { Button } from "@/components/ui/button"
@@ -14,21 +13,23 @@ const STATUS_COLOR: Record<string, string> = {
   archived: "bg-gray-50 text-gray-500 border-gray-200",
 }
 
-function ManifestRow({ m }: { m: Record<string, unknown> }) {
+function ManifestRow({ m, onRefresh }: { m: Record<string, unknown>; onRefresh: () => void }) {
   const [open, setOpen] = useState(false)
-  const qc = useQueryClient()
+  const [detail, setDetail] = useState<Record<string, unknown> | null>(null)
+  const [freezing, setFreezing] = useState(false)
   const mId = String(m._id ?? "")
 
-  const { data: detail } = useQuery({
-    queryKey: ["manifest", mId],
-    queryFn: () => getManifest(mId),
-    enabled: open,
-  })
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    getManifest(mId).then(d => { if (!cancelled) setDetail(d as Record<string, unknown>) }).catch(() => {})
+    return () => { cancelled = true }
+  }, [open, mId])
 
-  const freeze = useMutation({
-    mutationFn: () => freezeManifest(mId),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["manifests"] }),
-  })
+  async function freeze() {
+    setFreezing(true)
+    try { await freezeManifest(mId); onRefresh() } finally { setFreezing(false) }
+  }
 
   return (
     <div className="border rounded-lg bg-white">
@@ -48,7 +49,7 @@ function ManifestRow({ m }: { m: Record<string, unknown> }) {
           </span>
           <span className="text-xs text-muted-foreground">{formatDate(String(m.created_at ?? ""))}</span>
           {m.status === "open" && (
-            <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => freeze.mutate()} disabled={freeze.isPending}>
+            <Button size="sm" variant="outline" className="h-7 text-xs" onClick={freeze} disabled={freezing}>
               Freeze
             </Button>
           )}
@@ -58,21 +59,21 @@ function ManifestRow({ m }: { m: Record<string, unknown> }) {
       {open && detail && (
         <div className="px-4 pb-4">
           <table className="w-full text-xs mt-2">
-            <thead className="border-b"><tr className="text-left text-muted-foreground">
-              <th className="py-1.5 font-medium">Title</th>
-              <th className="py-1.5 font-medium">Type</th>
-              <th className="py-1.5 font-medium">Status</th>
-              <th className="py-1.5 font-medium">Version</th>
-              <th className="py-1.5 font-medium">Pushed</th>
-            </tr></thead>
+            <thead className="border-b">
+              <tr className="text-left text-muted-foreground">
+                <th className="py-1.5 font-medium">Title</th>
+                <th className="py-1.5 font-medium">Type</th>
+                <th className="py-1.5 font-medium">Status</th>
+                <th className="py-1.5 font-medium">Version</th>
+                <th className="py-1.5 font-medium">Pushed</th>
+              </tr>
+            </thead>
             <tbody>
-              {((detail as Record<string,unknown>).entries as Record<string,unknown>[] ?? []).map((e, i) => (
+              {(detail.entries as Record<string, unknown>[] ?? []).map((e, i) => (
                 <tr key={i} className="border-b last:border-0">
                   <td className="py-1.5 max-w-xs truncate font-medium">{String(e.title ?? "—")}</td>
                   <td className="py-1.5 text-muted-foreground">{String(e.source_type ?? "—")}</td>
-                  <td className="py-1.5">
-                    <span className="rounded bg-muted px-1.5 py-0.5">{String(e.status ?? "—")}</span>
-                  </td>
+                  <td className="py-1.5"><span className="rounded bg-muted px-1.5 py-0.5">{String(e.status ?? "—")}</span></td>
                   <td className="py-1.5 font-mono text-muted-foreground">{String(e.version_id ?? "—").slice(0, 8)}</td>
                   <td className="py-1.5 text-muted-foreground">{formatDate(String(e.pushed_at ?? ""))}</td>
                 </tr>
@@ -86,27 +87,51 @@ function ManifestRow({ m }: { m: Record<string, unknown> }) {
 }
 
 export default function Manifests() {
-  const qc = useQueryClient()
-  const { data: manifests = [], isLoading } = useQuery({
-    queryKey: ["manifests"],
-    queryFn: () => listManifests(),
-  })
+  const [manifests, setManifests] = useState<Record<string, unknown>[]>([])
+  const [loading, setLoading] = useState(true)
+  const [refreshKey, setRefreshKey] = useState(0)
 
-  // Snapshot form
   const [snapName, setSnapName] = useState("")
   const [snapUcId, setSnapUcId] = useState("")
   const [snapAgent, setSnapAgent] = useState("")
+  const [snapping, setSnapping] = useState(false)
+  const [snapDone, setSnapDone] = useState(false)
 
-  const snapshot = useMutation({
-    mutationFn: () => snapshotManifest({ usecase_id: snapUcId, agent_filter: snapAgent, manifest_name: snapName }),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ["manifests"] }); setSnapName(""); setSnapUcId(""); setSnapAgent("") },
-  })
-
-  // Diff form
   const [diffA, setDiffA] = useState("")
   const [diffB, setDiffB] = useState("")
-  const diff = useMutation({ mutationFn: () => diffManifests(diffA, diffB) })
-  const diffResult = diff.data as Record<string, unknown> | undefined
+  const [diffResult, setDiffResult] = useState<Record<string, unknown> | null>(null)
+  const [diffing, setDiffing] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    listManifests()
+      .then(d => { if (!cancelled) { setManifests(d as Record<string, unknown>[]); setLoading(false) } })
+      .catch(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [refreshKey])
+
+  async function doSnapshot() {
+    setSnapping(true); setSnapDone(false)
+    try {
+      await snapshotManifest({ usecase_id: snapUcId, agent_filter: snapAgent, manifest_name: snapName })
+      setRefreshKey(k => k + 1)
+      setSnapName(""); setSnapUcId(""); setSnapAgent("")
+      setSnapDone(true)
+    } finally {
+      setSnapping(false)
+    }
+  }
+
+  async function doDiff() {
+    setDiffing(true); setDiffResult(null)
+    try {
+      const r = await diffManifests(diffA, diffB)
+      setDiffResult(r as Record<string, unknown>)
+    } finally {
+      setDiffing(false)
+    }
+  }
 
   return (
     <div className="max-w-4xl space-y-6">
@@ -122,18 +147,18 @@ export default function Manifests() {
           <TabsTrigger value="diff">Diff</TabsTrigger>
         </TabsList>
 
-        {/* Browse */}
         <TabsContent value="browse" className="space-y-3">
-          {isLoading ? (
+          {loading ? (
             <p className="text-sm text-muted-foreground">Loading…</p>
-          ) : (manifests as Record<string,unknown>[]).length === 0 ? (
+          ) : manifests.length === 0 ? (
             <p className="text-sm text-muted-foreground">No manifests yet. Take a snapshot to create one.</p>
           ) : (
-            (manifests as Record<string,unknown>[]).map((m, i) => <ManifestRow key={i} m={m} />)
+            manifests.map((m, i) => (
+              <ManifestRow key={i} m={m} onRefresh={() => setRefreshKey(k => k + 1)} />
+            ))
           )}
         </TabsContent>
 
-        {/* Snapshot */}
         <TabsContent value="snapshot">
           <Card>
             <CardHeader><CardTitle className="text-sm">Snapshot Current Corpus</CardTitle></CardHeader>
@@ -156,20 +181,17 @@ export default function Manifests() {
                 </div>
               </div>
               <Button
-                onClick={() => snapshot.mutate()}
-                disabled={!snapName || !snapUcId || !snapAgent || snapshot.isPending}
+                onClick={doSnapshot}
+                disabled={!snapName || !snapUcId || !snapAgent || snapping}
                 className="w-full"
               >
-                {snapshot.isPending ? "Snapshotting…" : "Create Snapshot"}
+                {snapping ? "Snapshotting…" : "Create Snapshot"}
               </Button>
-              {snapshot.isSuccess && (
-                <p className="text-xs text-emerald-600">✓ Manifest created and frozen.</p>
-              )}
+              {snapDone && <p className="text-xs text-emerald-600">✓ Manifest created and frozen.</p>}
             </CardContent>
           </Card>
         </TabsContent>
 
-        {/* Diff */}
         <TabsContent value="diff">
           <Card>
             <CardHeader><CardTitle className="text-sm">Compare Two Manifests</CardTitle></CardHeader>
@@ -184,10 +206,9 @@ export default function Manifests() {
                   <Input value={diffB} onChange={e => setDiffB(e.target.value)} placeholder="manifest-id-b" className="font-mono text-xs" />
                 </div>
               </div>
-              <Button onClick={() => diff.mutate()} disabled={!diffA || !diffB || diff.isPending} className="w-full">
-                {diff.isPending ? "Comparing…" : "Compare"}
+              <Button onClick={doDiff} disabled={!diffA || !diffB || diffing} className="w-full">
+                {diffing ? "Comparing…" : "Compare"}
               </Button>
-
               {diffResult && (
                 <div className="grid grid-cols-4 gap-3 text-center text-sm">
                   {[

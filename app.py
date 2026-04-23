@@ -31,6 +31,7 @@ pg = st.navigation(
             st.Page("pages/review.py",      title="Review Queue", icon="📋"),
         ],
         "Knowledge Base": [
+            st.Page("pages/corpus.py",           title="Corpus",           icon="📦"),
             st.Page("pages/search.py",          title="Search",           icon="🔎"),
             st.Page("pages/drift.py",            title="KB Health",        icon="🔍"),
             st.Page("pages/ledger.py",           title="Ledger",           icon="📒"),

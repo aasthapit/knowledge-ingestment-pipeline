@@ -1,5 +1,4 @@
-import { useState } from "react"
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
+import { useState, useEffect } from "react"
 import { RefreshCw } from "lucide-react"
 import { listLedger, runDriftCheck } from "@/lib/api"
 import { Button } from "@/components/ui/button"
@@ -9,23 +8,34 @@ import { cn, formatDate, driftBadgeClass, driftIcon } from "@/lib/utils"
 const FILTERS = ["all", "current", "stale", "deleted", "unknown"] as const
 
 export default function KBHealth() {
-  const [filter, setFilter] = useState<string>("all")
-  const [kbFilter, setKbFilter] = useState("")
-  const qc = useQueryClient()
+  const [filter, setFilter] = useState("all")
+  const [kbFilter] = useState("")
+  const [docs, setDocs] = useState<Record<string, unknown>[]>([])
+  const [loading, setLoading] = useState(true)
+  const [refreshKey, setRefreshKey] = useState(0)
+  const [driftPending, setDriftPending] = useState(false)
 
-  const { data: docs = [], isLoading } = useQuery({
-    queryKey: ["ledger", kbFilter, filter],
-    queryFn: () => listLedger(kbFilter || undefined, filter !== "all" ? filter : undefined),
-    refetchInterval: 30000,
-  })
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    listLedger(kbFilter || undefined, filter !== "all" ? filter : undefined)
+      .then(d => { if (!cancelled) { setDocs(d as Record<string, unknown>[]); setLoading(false) } })
+      .catch(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [filter, kbFilter, refreshKey])
 
-  const driftCheck = useMutation({
-    mutationFn: () => runDriftCheck(kbFilter || undefined),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["ledger"] }),
-  })
+  async function checkDrift() {
+    setDriftPending(true)
+    try {
+      await runDriftCheck(kbFilter || undefined)
+      setRefreshKey(k => k + 1)
+    } finally {
+      setDriftPending(false)
+    }
+  }
 
   const counts: Record<string, number> = { current: 0, stale: 0, deleted: 0, unknown: 0 }
-  docs.forEach((d: Record<string, unknown>) => {
+  docs.forEach(d => {
     const s = String(d.drift_status ?? "unknown")
     counts[s] = (counts[s] ?? 0) + 1
   })
@@ -37,13 +47,12 @@ export default function KBHealth() {
           <h1 className="text-2xl font-bold">KB Health</h1>
           <p className="text-muted-foreground text-sm mt-1">Drift detection for all pushed documents</p>
         </div>
-        <Button variant="outline" onClick={() => driftCheck.mutate()} disabled={driftCheck.isPending} className="gap-2">
-          <RefreshCw className={cn("h-4 w-4", driftCheck.isPending && "animate-spin")} />
-          {driftCheck.isPending ? "Checking…" : "Check Drift"}
+        <Button variant="outline" onClick={checkDrift} disabled={driftPending} className="gap-2">
+          <RefreshCw className={cn("h-4 w-4", driftPending && "animate-spin")} />
+          {driftPending ? "Checking…" : "Check Drift"}
         </Button>
       </div>
 
-      {/* Summary */}
       <div className="grid grid-cols-4 gap-3">
         {[
           { key: "current", label: "Current", color: "text-emerald-600" },
@@ -60,32 +69,28 @@ export default function KBHealth() {
         ))}
       </div>
 
-      {/* Filter bar */}
-      <div className="flex items-center gap-3">
-        <div className="flex gap-1 rounded-lg bg-muted p-1">
-          {FILTERS.map(f => (
-            <button
-              key={f}
-              onClick={() => setFilter(f)}
-              className={cn(
-                "px-3 py-1 rounded-md text-sm transition-colors capitalize",
-                filter === f ? "bg-white shadow text-foreground" : "text-muted-foreground hover:text-foreground"
-              )}
-            >
-              {f}
-            </button>
-          ))}
-        </div>
+      <div className="flex gap-1 rounded-lg bg-muted p-1 w-fit">
+        {FILTERS.map(f => (
+          <button
+            key={f}
+            onClick={() => setFilter(f)}
+            className={cn(
+              "px-3 py-1 rounded-md text-sm transition-colors capitalize",
+              filter === f ? "bg-white shadow text-foreground" : "text-muted-foreground hover:text-foreground"
+            )}
+          >
+            {f}
+          </button>
+        ))}
       </div>
 
-      {/* Documents */}
-      {isLoading ? (
+      {loading ? (
         <p className="text-sm text-muted-foreground">Loading…</p>
       ) : docs.length === 0 ? (
         <p className="text-sm text-muted-foreground">No documents found.</p>
       ) : (
         <div className="space-y-2">
-          {docs.map((doc: Record<string, unknown>, i: number) => {
+          {docs.map((doc, i) => {
             const drift = String(doc.drift_status ?? "unknown")
             return (
               <div key={i} className="flex items-center gap-3 p-3 rounded-lg border bg-white text-sm">

@@ -1,5 +1,4 @@
 import { useState, useRef } from "react"
-import { useMutation } from "@tanstack/react-query"
 import { useNavigate } from "react-router-dom"
 import { Upload, Link, FileJson, CheckCircle, AlertTriangle } from "lucide-react"
 import { api } from "@/lib/api"
@@ -98,44 +97,23 @@ function MetaFields({
 }
 
 export default function Ingest() {
-  // Shared metadata state
   const [tags, setTags] = useState("")
   const [kbName, setKbName] = useState("default")
   const [ucId, setUcId] = useState("")
   const [agent, setAgent] = useState("")
   const [autoPush, setAutoPush] = useState(false)
   const [result, setResult] = useState<IngestResult | null>(null)
+  const [error, setError] = useState("")
 
-  // File tab
   const [file, setFile] = useState<File | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
-
-  // URL tab
   const [url, setUrl] = useState("")
-
-  // JSONL tab
   const [jsonlFile, setJsonlFile] = useState<File | null>(null)
   const jsonlRef = useRef<HTMLInputElement>(null)
 
-  const ingest = useMutation({
-    mutationFn: async (formData: FormData) => {
-      const res = await api.post<IngestResult>("/ingest/document", formData, {
-        headers: { "Content-Type": "multipart/form-data" },
-      })
-      return res.data
-    },
-    onSuccess: data => setResult(data),
-  })
-
-  const ingestJsonl = useMutation({
-    mutationFn: async (formData: FormData) => {
-      const res = await api.post<IngestResult>("/ingest/jsonl", formData, {
-        headers: { "Content-Type": "multipart/form-data" },
-      })
-      return res.data
-    },
-    onSuccess: data => setResult(data),
-  })
+  const [pendingDoc, setPendingDoc] = useState(false)
+  const [pendingJsonl, setPendingJsonl] = useState(false)
+  const busy = pendingDoc || pendingJsonl
 
   function buildMeta(fd: FormData) {
     if (tags) fd.append("tags", tags)
@@ -145,31 +123,53 @@ export default function Ingest() {
     fd.append("auto_push", String(autoPush))
   }
 
-  function submitFile() {
+  async function submitFile() {
     if (!file) return
     const fd = new FormData()
     fd.append("file", file)
     buildMeta(fd)
-    ingest.mutate(fd)
+    setError(""); setPendingDoc(true)
+    try {
+      const res = await api.post<IngestResult>("/ingest/document", fd, { headers: { "Content-Type": "multipart/form-data" } })
+      setResult(res.data)
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setPendingDoc(false)
+    }
   }
 
-  function submitUrl() {
+  async function submitUrl() {
     if (!url.trim()) return
     const fd = new FormData()
     fd.append("url", url.trim())
     buildMeta(fd)
-    ingest.mutate(fd)
+    setError(""); setPendingDoc(true)
+    try {
+      const res = await api.post<IngestResult>("/ingest/document", fd, { headers: { "Content-Type": "multipart/form-data" } })
+      setResult(res.data)
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setPendingDoc(false)
+    }
   }
 
-  function submitJsonl() {
+  async function submitJsonl() {
     if (!jsonlFile) return
     const fd = new FormData()
     fd.append("file", jsonlFile)
     buildMeta(fd)
-    ingestJsonl.mutate(fd)
+    setError(""); setPendingJsonl(true)
+    try {
+      const res = await api.post<IngestResult>("/ingest/jsonl", fd, { headers: { "Content-Type": "multipart/form-data" } })
+      setResult(res.data)
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setPendingJsonl(false)
+    }
   }
-
-  const busy = ingest.isPending || ingestJsonl.isPending
 
   return (
     <div className="max-w-2xl space-y-6">
@@ -185,7 +185,6 @@ export default function Ingest() {
           <TabsTrigger value="jsonl"><FileJson className="h-3.5 w-3.5 mr-1.5" />Bulk JSONL</TabsTrigger>
         </TabsList>
 
-        {/* File tab */}
         <TabsContent value="file" className="space-y-4">
           <div
             className="border-2 border-dashed rounded-lg p-8 text-center cursor-pointer hover:border-primary/50 transition-colors"
@@ -208,11 +207,10 @@ export default function Ingest() {
           </div>
           <MetaFields {...{ tags, setTags, kbName, setKbName, ucId, setUcId, agent, setAgent, autoPush, setAutoPush }} />
           <Button onClick={submitFile} disabled={!file || busy} className="w-full">
-            {ingest.isPending ? "Processing…" : "Ingest Document"}
+            {pendingDoc ? "Processing…" : "Ingest Document"}
           </Button>
         </TabsContent>
 
-        {/* URL tab */}
         <TabsContent value="url" className="space-y-4">
           <div>
             <label className="block text-xs font-medium mb-1 text-muted-foreground">Web Address</label>
@@ -220,11 +218,10 @@ export default function Ingest() {
           </div>
           <MetaFields {...{ tags, setTags, kbName, setKbName, ucId, setUcId, agent, setAgent, autoPush, setAutoPush }} />
           <Button onClick={submitUrl} disabled={!url.trim() || busy} className="w-full">
-            {ingest.isPending ? "Fetching…" : "Ingest URL"}
+            {pendingDoc ? "Fetching…" : "Ingest URL"}
           </Button>
         </TabsContent>
 
-        {/* JSONL tab */}
         <TabsContent value="jsonl" className="space-y-4">
           <div
             className="border-2 border-dashed rounded-lg p-8 text-center cursor-pointer hover:border-primary/50 transition-colors"
@@ -246,15 +243,12 @@ export default function Ingest() {
           </div>
           <MetaFields {...{ tags, setTags, kbName, setKbName, ucId, setUcId, agent, setAgent, autoPush, setAutoPush }} />
           <Button onClick={submitJsonl} disabled={!jsonlFile || busy} className="w-full">
-            {ingestJsonl.isPending ? "Importing…" : "Import JSONL"}
+            {pendingJsonl ? "Importing…" : "Import JSONL"}
           </Button>
         </TabsContent>
       </Tabs>
 
-      {/* Result */}
-      {(ingest.error || ingestJsonl.error) && (
-        <p className="text-sm text-red-600">Error: {String((ingest.error || ingestJsonl.error) ?? "")}</p>
-      )}
+      {error && <p className="text-sm text-red-600">Error: {error}</p>}
       {result && <ResultCard result={result} />}
     </div>
   )

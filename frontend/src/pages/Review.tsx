@@ -1,5 +1,4 @@
-import { useState } from "react"
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
+import { useState, useEffect } from "react"
 import { ChevronDown, ChevronRight, CheckCircle2, XCircle, Rocket, FileText, Globe, FileCode } from "lucide-react"
 import { listDocs, getDoc, approveDoc, rejectDoc, pushDocs, updateChunk } from "@/lib/api"
 import { Button } from "@/components/ui/button"
@@ -23,12 +22,7 @@ const STATUS_LABEL: Record<string, string> = {
 }
 
 const SOURCE_ICON: Record<string, React.FC<{ className?: string }>> = {
-  pdf: FileText,
-  docx: FileText,
-  pptx: FileText,
-  html: Globe,
-  url: Globe,
-  confluence: FileCode,
+  pdf: FileText, docx: FileText, pptx: FileText, html: Globe, url: Globe, confluence: FileCode,
 }
 
 function sourceIcon(type: string) {
@@ -50,21 +44,26 @@ function statusBadge(status: string) {
   )
 }
 
-function ChunkRow({ chunk, docId }: { chunk: Chunk; docId: string }) {
+function ChunkRow({ chunk, docId, onRefresh }: { chunk: Chunk; docId: string; onRefresh: () => void }) {
   const [editing, setEditing] = useState(false)
   const [content, setContent] = useState(String(chunk.content ?? ""))
   const [tags, setTags] = useState((chunk.tags as string[] ?? []).join(", "))
-  const qc = useQueryClient()
-
-  const save = useMutation({
-    mutationFn: () => updateChunk(docId, String(chunk._id ?? chunk.chunk_id), {
-      content,
-      tags: tags.split(",").map(t => t.trim()).filter(Boolean),
-    }),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ["doc", docId] }); setEditing(false) },
-  })
-
+  const [saving, setSaving] = useState(false)
   const flags = chunk.quality_flags as string[] ?? []
+
+  async function save() {
+    setSaving(true)
+    try {
+      await updateChunk(docId, String(chunk._id ?? chunk.chunk_id), {
+        content,
+        tags: tags.split(",").map(t => t.trim()).filter(Boolean),
+      })
+      onRefresh()
+      setEditing(false)
+    } finally {
+      setSaving(false)
+    }
+  }
 
   return (
     <div className="border rounded-md p-3 text-sm space-y-2">
@@ -84,14 +83,13 @@ function ChunkRow({ chunk, docId }: { chunk: Chunk; docId: string }) {
           </Button>
         </div>
       </div>
-
       {editing ? (
         <div className="space-y-2">
           <Textarea value={content} onChange={e => setContent(e.target.value)} rows={4} className="text-sm" />
           <div className="flex items-center gap-2">
             <Input value={tags} onChange={e => setTags(e.target.value)} placeholder="tags, comma-separated" className="text-xs h-7" />
-            <Button size="sm" className="h-7 text-xs shrink-0" onClick={() => save.mutate()} disabled={save.isPending}>
-              {save.isPending ? "Saving…" : "Save"}
+            <Button size="sm" className="h-7 text-xs shrink-0" onClick={save} disabled={saving}>
+              {saving ? "Saving…" : "Save"}
             </Button>
           </div>
         </div>
@@ -102,41 +100,42 @@ function ChunkRow({ chunk, docId }: { chunk: Chunk; docId: string }) {
   )
 }
 
-function DocCard({ doc }: { doc: DocSummary }) {
+function DocCard({ doc, onListRefresh }: { doc: DocSummary; onListRefresh: () => void }) {
   const [open, setOpen] = useState(false)
-  const qc = useQueryClient()
+  const [detail, setDetail] = useState<Record<string, unknown> | null>(null)
+  const [detailKey, setDetailKey] = useState(0)
+  const [approving, setApproving] = useState(false)
+  const [rejecting, setRejecting] = useState(false)
+  const [pushing, setPushing] = useState(false)
   const docId = String(doc._id ?? doc.doc_id)
 
-  const { data: detail } = useQuery({
-    queryKey: ["doc", docId],
-    queryFn: () => getDoc(docId),
-    enabled: open,
-  })
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    getDoc(docId).then(d => { if (!cancelled) setDetail(d as Record<string, unknown>) }).catch(() => {})
+    return () => { cancelled = true }
+  }, [open, docId, detailKey])
 
-  const approve = useMutation({
-    mutationFn: () => approveDoc(docId),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["docs"] }),
-  })
-  const reject = useMutation({
-    mutationFn: () => rejectDoc(docId),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["docs"] }),
-  })
-  const push = useMutation({
-    mutationFn: () => pushDocs(docId),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["docs"] }),
-  })
+  async function approve() {
+    setApproving(true)
+    try { await approveDoc(docId); onListRefresh() } finally { setApproving(false) }
+  }
+  async function reject() {
+    setRejecting(true)
+    try { await rejectDoc(docId); onListRefresh() } finally { setRejecting(false) }
+  }
+  async function push() {
+    setPushing(true)
+    try { await pushDocs(docId); onListRefresh() } finally { setPushing(false) }
+  }
 
-  const chunks: Chunk[] = detail?.chunks ?? []
+  const chunks: Chunk[] = (detail?.chunks as Chunk[]) ?? []
   const status = String(doc.status ?? "")
   const score = Number(doc.quality_score ?? 0)
 
   return (
     <div className="border rounded-lg bg-white shadow-sm">
-      {/* Header */}
-      <div
-        className="flex items-center gap-3 p-4 cursor-pointer select-none"
-        onClick={() => setOpen(o => !o)}
-      >
+      <div className="flex items-center gap-3 p-4 cursor-pointer select-none" onClick={() => setOpen(o => !o)}>
         {open ? <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" /> : <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />}
         {sourceIcon(String(doc.source_type ?? ""))}
         <div className="flex-1 min-w-0">
@@ -150,24 +149,23 @@ function DocCard({ doc }: { doc: DocSummary }) {
           <QualityBadge score={score} />
           {statusBadge(status)}
           {status === "pending_review" && (
-            <Button size="sm" className="h-7 text-xs" onClick={() => approve.mutate()} disabled={approve.isPending}>
+            <Button size="sm" className="h-7 text-xs" onClick={approve} disabled={approving}>
               <CheckCircle2 className="h-3.5 w-3.5 mr-1" />Approve
             </Button>
           )}
           {status === "approved" && (
-            <Button size="sm" className="h-7 text-xs" onClick={() => push.mutate()} disabled={push.isPending}>
-              <Rocket className="h-3.5 w-3.5 mr-1" />{push.isPending ? "Pushing…" : "Push"}
+            <Button size="sm" className="h-7 text-xs" onClick={push} disabled={pushing}>
+              <Rocket className="h-3.5 w-3.5 mr-1" />{pushing ? "Pushing…" : "Push"}
             </Button>
           )}
           {status !== "rejected" && status !== "pushed" && (
-            <Button size="sm" variant="outline" className="h-7 text-xs text-red-600 border-red-200 hover:bg-red-50" onClick={() => reject.mutate()} disabled={reject.isPending}>
+            <Button size="sm" variant="outline" className="h-7 text-xs text-red-600 border-red-200 hover:bg-red-50" onClick={reject} disabled={rejecting}>
               <XCircle className="h-3.5 w-3.5 mr-1" />Reject
             </Button>
           )}
         </div>
       </div>
 
-      {/* Quality flags */}
       {open && (doc.quality_flags as string[] ?? []).length > 0 && (
         <div className="px-4 pb-2 flex flex-wrap gap-1">
           {(doc.quality_flags as string[]).map(f => (
@@ -176,13 +174,14 @@ function DocCard({ doc }: { doc: DocSummary }) {
         </div>
       )}
 
-      {/* Chunks */}
       {open && (
         <div className="px-4 pb-4 space-y-2">
           {chunks.length === 0 ? (
             <p className="text-xs text-muted-foreground">Loading sections…</p>
           ) : (
-            chunks.map((c, i) => <ChunkRow key={i} chunk={c} docId={docId} />)
+            chunks.map((c, i) => (
+              <ChunkRow key={i} chunk={c} docId={docId} onRefresh={() => setDetailKey(k => k + 1)} />
+            ))
           )}
         </div>
       )}
@@ -192,27 +191,31 @@ function DocCard({ doc }: { doc: DocSummary }) {
 
 export default function Review() {
   const [tab, setTab] = useState<StatusTab>("all")
+  const [docs, setDocs] = useState<DocSummary[]>([])
+  const [loading, setLoading] = useState(true)
+  const [refreshKey, setRefreshKey] = useState(0)
   const [pushing, setPushing] = useState(false)
-  const qc = useQueryClient()
 
-  const { data: docs = [], isLoading } = useQuery<DocSummary[]>({
-    queryKey: ["docs"],
-    queryFn: () => listDocs(),
-    refetchInterval: 10000,
-  })
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    listDocs()
+      .then(d => { if (!cancelled) { setDocs(d as DocSummary[]); setLoading(false) } })
+      .catch(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [refreshKey])
+
+  useEffect(() => {
+    const id = setInterval(() => setRefreshKey(k => k + 1), 10000)
+    return () => clearInterval(id)
+  }, [])
 
   const filtered = tab === "all" ? docs : docs.filter(d => d.status === tab)
   const approvedCount = docs.filter(d => d.status === "approved").length
 
   async function pushAll() {
     setPushing(true)
-    try {
-      await pushDocs()
-      qc.invalidateQueries({ queryKey: ["docs"] })
-      qc.invalidateQueries({ queryKey: ["stats"] })
-    } finally {
-      setPushing(false)
-    }
+    try { await pushDocs(); setRefreshKey(k => k + 1) } finally { setPushing(false) }
   }
 
   return (
@@ -230,7 +233,6 @@ export default function Review() {
         )}
       </div>
 
-      {/* Status tabs */}
       <div className="flex gap-1 border-b">
         {STATUS_TABS.map(t => {
           const count = t === "all" ? docs.length : docs.filter(d => d.status === t).length
@@ -252,8 +254,7 @@ export default function Review() {
         })}
       </div>
 
-      {/* Doc list */}
-      {isLoading ? (
+      {loading ? (
         <p className="text-sm text-muted-foreground">Loading…</p>
       ) : filtered.length === 0 ? (
         <div className="text-center py-16 text-muted-foreground">
@@ -261,7 +262,9 @@ export default function Review() {
         </div>
       ) : (
         <div className="space-y-3">
-          {filtered.map((doc, i) => <DocCard key={i} doc={doc} />)}
+          {filtered.map((doc, i) => (
+            <DocCard key={i} doc={doc} onListRefresh={() => setRefreshKey(k => k + 1)} />
+          ))}
         </div>
       )}
     </div>

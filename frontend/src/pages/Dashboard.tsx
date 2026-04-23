@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query"
+import { useState, useEffect } from "react"
 import { useNavigate } from "react-router-dom"
 import { Upload, GitPullRequestArrow, Search, Clock } from "lucide-react"
 import { getStats } from "@/lib/api"
@@ -9,7 +9,20 @@ import { formatDate } from "@/lib/utils"
 
 export default function Dashboard() {
   const navigate = useNavigate()
-  const { data, isLoading } = useQuery({ queryKey: ["stats"], queryFn: getStats, refetchInterval: 15000 })
+  const [data, setData] = useState<Record<string, unknown> | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    function load() {
+      getStats()
+        .then(d => { if (!cancelled) { setData(d); setLoading(false) } })
+        .catch(() => { if (!cancelled) setLoading(false) })
+    }
+    load()
+    const id = setInterval(load, 15000)
+    return () => { cancelled = true; clearInterval(id) }
+  }, [])
 
   return (
     <div className="max-w-5xl space-y-8">
@@ -18,35 +31,33 @@ export default function Dashboard() {
         <p className="text-muted-foreground text-sm mt-1">Knowledge base health at a glance</p>
       </div>
 
-      {/* Stat cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard
           label="Indexed Sections"
-          value={isLoading ? "—" : (data?.indexed_chunks ?? 0).toLocaleString()}
+          value={loading ? "—" : ((data?.indexed_chunks as number) ?? 0).toLocaleString()}
           sub="searchable in Redis"
         />
         <StatCard
           label="Needs Review"
-          value={isLoading ? "—" : data?.pending_review ?? 0}
+          value={loading ? "—" : (data?.pending_review as number) ?? 0}
           sub="awaiting approval"
           className={data?.pending_review ? "border-amber-200" : ""}
           onClick={() => navigate("/review")}
         />
         <StatCard
           label="Ready to Push"
-          value={isLoading ? "—" : data?.approved ?? 0}
+          value={loading ? "—" : (data?.approved as number) ?? 0}
           sub="approved, not yet live"
           className={data?.approved ? "border-blue-200" : ""}
           onClick={() => navigate("/review")}
         />
         <StatCard
           label="Pushed Today"
-          value={isLoading ? "—" : data?.pushed_today ?? 0}
+          value={loading ? "—" : (data?.pushed_today as number) ?? 0}
           sub="sections indexed today"
         />
       </div>
 
-      {/* Quick actions */}
       <div>
         <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-3">Quick Actions</h2>
         <div className="flex flex-wrap gap-3">
@@ -58,7 +69,7 @@ export default function Dashboard() {
             Review Queue
             {data?.pending_review ? (
               <span className="ml-1 rounded-full bg-amber-100 text-amber-800 text-xs px-1.5 py-0.5 font-semibold">
-                {data.pending_review}
+                {data.pending_review as number}
               </span>
             ) : null}
           </Button>
@@ -68,7 +79,6 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Recent activity */}
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-sm flex items-center gap-2">
@@ -76,7 +86,7 @@ export default function Dashboard() {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          {!data?.recent_pushes?.length ? (
+          {!(data?.recent_pushes as unknown[] | undefined)?.length ? (
             <p className="text-sm text-muted-foreground">No push history yet.</p>
           ) : (
             <table className="w-full text-sm">
@@ -89,7 +99,7 @@ export default function Dashboard() {
                 </tr>
               </thead>
               <tbody>
-                {data.recent_pushes.map((s: Record<string, unknown>, i: number) => (
+                {(data!.recent_pushes as Record<string, unknown>[]).map((s, i) => (
                   <tr key={i} className="border-b last:border-0">
                     <td className="py-2 font-mono text-xs text-muted-foreground">{String(s._id ?? "").slice(0, 12)}…</td>
                     <td className="py-2">{String(s.docs_pushed ?? 0)}</td>

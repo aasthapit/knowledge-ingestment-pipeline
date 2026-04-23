@@ -1,5 +1,4 @@
-import { useState } from "react"
-import { useMutation, useQuery } from "@tanstack/react-query"
+import { useState, useEffect } from "react"
 import { Search as SearchIcon, ExternalLink } from "lucide-react"
 import { search, listUsecases, listAgents } from "@/lib/api"
 import { Button } from "@/components/ui/button"
@@ -35,23 +34,37 @@ export default function SearchPage() {
   const [agent, setAgent] = useState("all")
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
-  const { data: usecases = [] } = useQuery({ queryKey: ["usecases"], queryFn: listUsecases })
-  const { data: agents = [] } = useQuery({
-    queryKey: ["agents", ucId],
-    queryFn: () => listAgents(ucId),
-    enabled: ucId !== "all",
-  })
+  const [usecases, setUsecases] = useState<string[]>([])
+  const [agents, setAgents] = useState<string[]>([])
+  const [results, setResults] = useState<Result[]>([])
+  const [searching, setSearching] = useState(false)
+  const [searched, setSearched] = useState(false)
 
-  const doSearch = useMutation({
-    mutationFn: () => search({
-      query,
-      top_k: topK,
-      usecase_id: ucId !== "all" ? ucId : undefined,
-      agent_filter: agent !== "all" ? agent : undefined,
-    }),
-  })
+  useEffect(() => {
+    listUsecases().then(d => setUsecases(d as string[])).catch(() => {})
+  }, [])
 
-  const results: Result[] = (doSearch.data as Result[]) ?? []
+  useEffect(() => {
+    if (ucId === "all") { setAgents([]); return }
+    listAgents(ucId).then(d => setAgents(d as string[])).catch(() => {})
+  }, [ucId])
+
+  async function doSearch() {
+    if (!query.trim()) return
+    setSearching(true)
+    try {
+      const data = await search({
+        query,
+        top_k: topK,
+        usecase_id: ucId !== "all" ? ucId : undefined,
+        agent_filter: agent !== "all" ? agent : undefined,
+      })
+      setResults((data as { results?: Result[] }).results ?? data as Result[])
+      setSearched(true)
+    } finally {
+      setSearching(false)
+    }
+  }
 
   function toggle(id: string) {
     setExpanded(s => {
@@ -68,24 +81,22 @@ export default function SearchPage() {
         <p className="text-muted-foreground text-sm mt-1">Semantic search across the knowledge base</p>
       </div>
 
-      {/* Search bar */}
       <div className="flex gap-2">
         <div className="relative flex-1">
           <SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <Input
             value={query}
             onChange={e => setQuery(e.target.value)}
-            onKeyDown={e => e.key === "Enter" && query.trim() && doSearch.mutate()}
+            onKeyDown={e => e.key === "Enter" && doSearch()}
             placeholder="Ask a question or search by keyword…"
             className="pl-9"
           />
         </div>
-        <Button onClick={() => doSearch.mutate()} disabled={!query.trim() || doSearch.isPending}>
-          {doSearch.isPending ? "Searching…" : "Search"}
+        <Button onClick={doSearch} disabled={!query.trim() || searching}>
+          {searching ? "Searching…" : "Search"}
         </Button>
       </div>
 
-      {/* Filters */}
       <div className="flex flex-wrap gap-3 items-center">
         <div className="flex items-center gap-2">
           <label className="text-xs text-muted-foreground whitespace-nowrap">Use case</label>
@@ -93,7 +104,7 @@ export default function SearchPage() {
             <SelectTrigger className="h-8 w-44 text-xs"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All use cases</SelectItem>
-              {usecases.map((u: string) => <SelectItem key={u} value={u}>{u}</SelectItem>)}
+              {usecases.map(u => <SelectItem key={u} value={u}>{u}</SelectItem>)}
             </SelectContent>
           </Select>
         </div>
@@ -104,7 +115,7 @@ export default function SearchPage() {
               <SelectTrigger className="h-8 w-44 text-xs"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All agents</SelectItem>
-                {agents.map((a: string) => <SelectItem key={a} value={a}>{a}</SelectItem>)}
+                {agents.map(a => <SelectItem key={a} value={a}>{a}</SelectItem>)}
               </SelectContent>
             </Select>
           </div>
@@ -121,9 +132,8 @@ export default function SearchPage() {
         </div>
       </div>
 
-      {/* Results */}
-      {doSearch.isPending && <p className="text-sm text-muted-foreground">Searching…</p>}
-      {!doSearch.isPending && doSearch.isSuccess && results.length === 0 && (
+      {searching && <p className="text-sm text-muted-foreground">Searching…</p>}
+      {!searching && searched && results.length === 0 && (
         <p className="text-sm text-muted-foreground">No results found.</p>
       )}
 
@@ -132,7 +142,6 @@ export default function SearchPage() {
           const isExpanded = expanded.has(r.chunk_id)
           const preview = r.content.slice(0, 600)
           const hasMore = r.content.length > 600
-
           return (
             <Card key={r.chunk_id} className="overflow-hidden">
               <CardContent className="p-4 space-y-2">
@@ -151,12 +160,10 @@ export default function SearchPage() {
                   </div>
                   <ScoreBadge score={r.score} />
                 </div>
-
                 <p className="text-sm text-foreground/80 whitespace-pre-wrap">
                   {isExpanded ? r.content : preview}
                   {!isExpanded && hasMore && "…"}
                 </p>
-
                 <div className="flex items-center justify-between gap-2 pt-1">
                   <div className="flex items-center gap-2">
                     {r.source && (
@@ -176,10 +183,7 @@ export default function SearchPage() {
                       <span key={t} className="rounded bg-muted text-muted-foreground text-xs px-1.5 py-0.5">{t}</span>
                     ))}
                     {hasMore && (
-                      <button
-                        onClick={() => toggle(r.chunk_id)}
-                        className="text-xs text-primary hover:underline"
-                      >
+                      <button onClick={() => toggle(r.chunk_id)} className="text-xs text-primary hover:underline">
                         {isExpanded ? "Show less" : "Show more"}
                       </button>
                     )}
