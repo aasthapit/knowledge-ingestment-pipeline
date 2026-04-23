@@ -115,6 +115,42 @@ def export_ledger_csv(
     return output_path
 
 
+def export_chunks_as_jsonl(
+    chunks: list[dict[str, Any]],
+    output_path: str | Path | None = None,
+) -> Path:
+    """
+    Write a list of already-serialised chunk dicts to a pipeline-schema JSONL file.
+
+    Used for usecase exports where chunks are fetched from MongoDB directly
+    rather than from Chunk objects.  Each dict is written as-is.
+
+    Parameters
+    ----------
+    chunks:      List of chunk dicts (as returned by MongoStagingStore.get_chunks_by_usecase).
+    output_path: Explicit file path.  If *None*, auto-generated inside JSONL_OUTPUT_DIR.
+
+    Returns
+    -------
+    Path of the written file.
+    """
+    if output_path is None:
+        settings.jsonl_output_dir.mkdir(parents=True, exist_ok=True)
+        import time
+        ts = int(time.time())
+        output_path = settings.jsonl_output_dir / f"usecase_export_{ts}.jsonl"
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with output_path.open("w", encoding="utf-8") as fh:
+        for chunk in chunks:
+            fh.write(json.dumps(chunk, ensure_ascii=False, default=str) + "\n")
+
+    logger.info("Exported %d chunk dicts → %s", len(chunks), output_path)
+    return output_path
+
+
 def load_jsonl(path: str | Path) -> list[dict[str, Any]]:
     """Read a JSONL file back into a list of dicts."""
     path = Path(path)

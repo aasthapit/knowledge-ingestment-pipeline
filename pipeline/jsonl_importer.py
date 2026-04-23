@@ -357,6 +357,9 @@ def import_jsonl(
     extra_tags: list[str] | None = None,
     progress_cb: Callable[[int, int], None] | None = None,
     kb_name: str = "default",
+    usecase_id: str | None = None,
+    agent_filter: str | None = None,
+    require_usecase: bool = False,
 ) -> dict[str, Any]:
     """
     Parse an entire JSONL file and stage all chunks as a single import batch.
@@ -379,6 +382,15 @@ def import_jsonl(
         ``total`` is ``-1`` when the file size is unknown.
     kb_name:
         Logical knowledge base name for ledger grouping and drift tracking.
+    usecase_id:
+        Business use-case identifier (e.g. ``"GENAI1597_SSOP"``). Required
+        when ``require_usecase=True`` or when the schema is ``"crawler"``.
+        Falls back to the first record's ``usecase_id`` field if not supplied.
+    agent_filter:
+        Target agent/persona identifier. Same requirements as ``usecase_id``.
+    require_usecase:
+        When True, raise ``ValueError`` if either ``usecase_id`` or
+        ``agent_filter`` cannot be resolved.
 
     Returns
     -------
@@ -404,6 +416,51 @@ def import_jsonl(
             batch_name = Path(source).name
         else:
             batch_name = getattr(source, "name", "jsonl_import")
+
+    # Peek at first record to detect schema and fall back usecase fields
+    def _peek_first() -> dict:
+        if isinstance(source, (str, Path)):
+            with open(source, encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line:
+                        try:
+                            return json.loads(line)
+                        except json.JSONDecodeError:
+                            pass
+        else:
+            try:
+                source.seek(0)
+            except Exception:
+                pass
+            for raw in source:
+                line = (raw.decode("utf-8") if isinstance(raw, bytes) else raw).strip()
+                if line:
+                    try:
+                        rec = json.loads(line)
+                        source.seek(0)
+                        return rec
+                    except json.JSONDecodeError:
+                        pass
+            try:
+                source.seek(0)
+            except Exception:
+                pass
+        return {}
+
+    first_rec = _peek_first()
+    first_schema = detect_schema(first_rec)
+
+    # Resolve usecase_id / agent_filter from parameters or first-record fields
+    resolved_usecase_id   = usecase_id   or first_rec.get("usecase_id", "") or ""
+    resolved_agent_filter = agent_filter or first_rec.get("agent_filter", "") or ""
+
+    if require_usecase or first_schema == "crawler":
+        if not resolved_usecase_id or not resolved_agent_filter:
+            raise ValueError(
+                "JSONL import requires usecase_id and agent_filter. "
+                "Pass them as parameters or ensure every record contains these fields."
+            )
 
     # Stream + map
     def _line_iter():
@@ -471,6 +528,8 @@ def import_jsonl(
         "quality_flags":          "[]",
         "status":                 "approved",
         "kb_name":                kb_name,
+        "usecase_id":             resolved_usecase_id or None,
+        "agent_filter":           resolved_agent_filter or None,
     }
 
     # If all embeddings are pre-computed, attach them into the chunk dicts

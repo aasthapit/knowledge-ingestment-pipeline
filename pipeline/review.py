@@ -176,7 +176,7 @@ def reject_doc(doc_id: str, reason: str = "") -> bool:
 
 def push_approved(
     doc_id: str | None = None,
-    remove_after_push: bool = True,
+    remove_after_push: bool = False,
 ) -> dict[str, Any]:
     """
     Embed all approved chunks and upsert them into the configured vector backend.
@@ -187,7 +187,8 @@ def push_approved(
         If given, push only this specific document (must be approved).
         If None, push all approved documents.
     remove_after_push:
-        Whether to remove the staging data after a successful push (default True).
+        Whether to delete staging docs/chunks after a successful push.
+        Defaults to False so staging data is retained for audit and JSONL export.
 
     Returns
     -------
@@ -278,6 +279,8 @@ def push_approved(
             pushed_doc_ids.append(did)
 
             # Record push in the KB ledger for drift tracking
+            uc_id  = doc_meta.get("usecase_id") or None
+            ag_flt = doc_meta.get("agent_filter") or None
             try:
                 ledger = mongo_store.get_ledger()
                 ledger.record_push(
@@ -290,9 +293,27 @@ def push_approved(
                     tags=doc_meta.get("suggested_tags") or [],
                     quality_score=qs_value,
                     kb_name=doc_meta.get("kb_name", "default"),
+                    usecase_id=uc_id,
+                    agent_filter=ag_flt,
                 )
             except Exception as ledger_exc:
                 logger.warning("Could not record push to ledger: %s", ledger_exc)
+
+            # Update usecase-level ledger when usecase_id + agent_filter are set
+            if uc_id and ag_flt:
+                try:
+                    uc_ledger = mongo_store.get_usecase_ledger()
+                    uc_ledger.record_push(
+                        usecase_id=uc_id,
+                        agent_filter=ag_flt,
+                        kb_name=doc_meta.get("kb_name", "default"),
+                        doc_ids=[did],
+                        chunk_ids=[c.chunk_id for c in chunks],
+                    )
+                except Exception as uc_exc:
+                    logger.warning("Could not update usecase ledger: %s", uc_exc)
+
+            staging.mark_pushed(did)
 
             if remove_after_push:
                 staging.remove_doc(did)

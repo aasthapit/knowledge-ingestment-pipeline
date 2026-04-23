@@ -27,4 +27,7 @@ dependencies = [
     "streamlit>=1.40.0",
     # Document ledger / staging
     "pymongo>=4.10.0",
+    # Confluence refresh scheduler
+    "apscheduler>=3.10.0",
+    "croniter>=2.0.0",
 ]

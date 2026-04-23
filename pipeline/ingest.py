@@ -274,6 +274,9 @@ def ingest_jsonl(
     extra_tags: list[str] | None = None,
     progress_cb=None,
     kb_name: str = "default",
+    usecase_id: str | None = None,
+    agent_filter: str | None = None,
+    require_usecase: bool = False,
 ) -> dict:
     """
     Import a JSONL chunk file into the staging area.
@@ -297,6 +300,13 @@ def ingest_jsonl(
         Optional ``progress_cb(done: int, total: int)`` for progress updates.
     kb_name:
         Logical knowledge base name for ledger grouping and drift tracking.
+    usecase_id:
+        Business use-case identifier. Required for crawler-schema files or
+        when ``require_usecase=True``.
+    agent_filter:
+        Target agent/persona identifier.
+    require_usecase:
+        When True, raise ``ValueError`` if usecase_id or agent_filter are missing.
 
     Returns
     -------
@@ -312,7 +322,51 @@ def ingest_jsonl(
         extra_tags=extra_tags,
         progress_cb=progress_cb,
         kb_name=kb_name,
+        usecase_id=usecase_id,
+        agent_filter=agent_filter,
+        require_usecase=require_usecase,
     )
+
+
+def export_usecase_jsonl(
+    usecase_id: str,
+    agent_filter: str,
+    output_path: str | Path | None = None,
+    status: str | None = "pushed",
+) -> dict:
+    """
+    Export all chunks for a (usecase_id, agent_filter) pair to a JSONL file.
+
+    Parameters
+    ----------
+    usecase_id:    Business use-case identifier.
+    agent_filter:  Target agent/persona identifier.
+    output_path:   Write path. Defaults to a timestamped file in JSONL_OUTPUT_DIR.
+    status:        Filter docs by status (default: ``"pushed"``). Pass ``None``
+                   to include all statuses (approved + pending + pushed).
+
+    Returns
+    -------
+    dict
+        ``{"chunk_count": int, "output_path": str}``
+    """
+    from pipeline.exporter import export_chunks_as_jsonl
+
+    staging = mongo_store.get_staging()
+    chunk_dicts = staging.get_chunks_by_usecase(usecase_id, agent_filter, status=status)
+
+    if not chunk_dicts:
+        raise ValueError(
+            f"No chunks found for usecase_id={usecase_id!r}, "
+            f"agent_filter={agent_filter!r}, status={status!r}."
+        )
+
+    out = export_chunks_as_jsonl(chunk_dicts, output_path=output_path)
+    logger.info(
+        "Exported %d chunks for usecase=%s agent=%s → %s",
+        len(chunk_dicts), usecase_id, agent_filter, out,
+    )
+    return {"chunk_count": len(chunk_dicts), "output_path": str(out)}
 
 
 # ---------------------------------------------------------------------------

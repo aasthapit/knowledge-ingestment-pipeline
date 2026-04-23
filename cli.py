@@ -369,21 +369,22 @@ def review_reject_cmd(doc_id: str, reason: str) -> None:
 @review_group.command("push")
 @click.option("--doc-id", default=None, help="Push only this specific document ID.")
 @click.option(
-    "--keep-staging",
+    "--remove-staging",
     is_flag=True,
     default=False,
-    help="Do not remove staging data after a successful push.",
+    help="Delete staging docs/chunks after a successful push (default: keep for audit).",
 )
-def review_push_cmd(doc_id: str | None, keep_staging: bool) -> None:
+def review_push_cmd(doc_id: str | None, remove_staging: bool) -> None:
     """
     Embed all approved documents and push them to the vector store.
 
     Operates on ALL approved documents unless --doc-id is given.
+    Staging data is retained by default for audit and JSONL export.
     """
     from pipeline.review import push_approved
 
     _console.print("Embedding and pushing approved documents …")
-    result = push_approved(doc_id=doc_id, remove_after_push=not keep_staging)
+    result = push_approved(doc_id=doc_id, remove_after_push=remove_staging)
 
     if result["errors"]:
         for err in result["errors"]:

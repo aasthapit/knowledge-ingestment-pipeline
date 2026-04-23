@@ -126,6 +126,24 @@ with tab_jsonl:
         )
         jsonl_tags = [t.strip() for t in jsonl_tags_raw.split(",") if t.strip()]
 
+        # Use case tracking — required for crawler-schema files
+        _is_crawler = preview and preview.get("schema") == "crawler"
+        uc_col1, uc_col2 = st.columns(2)
+        with uc_col1:
+            jsonl_usecase_id = st.text_input(
+                "Use case ID" + (" *" if _is_crawler else "  *(optional)*"),
+                placeholder="GENAI1597_SSOP",
+                help="Business use-case identifier for ledger tracking. Required for crawler-schema files.",
+                key="jsonl_usecase_id",
+            )
+        with uc_col2:
+            jsonl_agent_filter = st.text_input(
+                "Agent filter" + (" *" if _is_crawler else "  *(optional)*"),
+                placeholder="ssop_cloud_operations_knowledge_agent",
+                help="Target agent/persona identifier for ledger tracking. Required for crawler-schema files.",
+                key="jsonl_agent_filter",
+            )
+
         if not preview or not preview.get("has_embeddings"):
             st.info(
                 "⚡ This file has no pre-computed embeddings. "
@@ -165,6 +183,9 @@ with tab_jsonl:
                     extra_tags=jsonl_tags,
                     progress_cb=_progress,
                     kb_name=jsonl_kb_name.strip() or "default",
+                    usecase_id=jsonl_usecase_id.strip() or None,
+                    agent_filter=jsonl_agent_filter.strip() or None,
+                    require_usecase=bool(_is_crawler),
                 )
                 progress_bar.progress(1.0, text="Done!")
                 st.session_state["last_jsonl_import"] = result

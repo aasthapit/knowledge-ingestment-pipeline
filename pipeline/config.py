@@ -107,6 +107,8 @@ class Settings:
     mongodb_coll_staging_chunks: str = os.getenv("MONGODB_COLL_STAGING_CHUNKS", "staging_chunks")
     mongodb_coll_kb_documents:   str = os.getenv("MONGODB_COLL_KB_DOCUMENTS",   "kb_documents")
     mongodb_coll_kb_snapshots:   str = os.getenv("MONGODB_COLL_KB_SNAPSHOTS",   "kb_snapshots")
+    mongodb_coll_usecase_ledger:     str = os.getenv("MONGODB_COLL_USECASE_LEDGER",     "usecase_ledger")
+    mongodb_coll_usecase_confluence: str = os.getenv("MONGODB_COLL_USECASE_CONFLUENCE", "usecase_confluence_sources")
 
     def validate(self) -> None:
         """Raise ValueError for obviously missing required settings."""

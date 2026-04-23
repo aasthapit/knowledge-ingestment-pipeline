@@ -259,7 +259,7 @@ for doc in visible_docs:
                                 # Content (collapsed) — editable
                                 with st.expander("Content", expanded=False):
                                     edited = st.text_area(
-                                        "",
+                                        "Edit content",
                                         value=content,
                                         height=200,
                                         key=f"content_{chunk_id}",

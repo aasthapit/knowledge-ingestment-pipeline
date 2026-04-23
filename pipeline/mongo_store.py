@@ -128,6 +128,9 @@ class MongoStagingStore:
         """Create indexes the first time the store is used."""
         self._docs.create_index("status")
         self._docs.create_index("ingested_at")
+        self._docs.create_index("usecase_id")
+        self._docs.create_index("agent_filter")
+        self._docs.create_index([("usecase_id", ASCENDING), ("agent_filter", ASCENDING)])
         self._chunks.create_index("doc_id")
         self._chunks.create_index("chunk_id", unique=True, sparse=True)
 
@@ -202,6 +205,8 @@ class MongoStagingStore:
             "has_embeddings":        _bool(meta.get("has_embeddings", False)),
             "has_partial_embeddings": _bool(meta.get("has_partial_embeddings", False)),
             "kb_name":               meta.get("kb_name", "default"),
+            "usecase_id":            meta.get("usecase_id") or None,
+            "agent_filter":          meta.get("agent_filter") or None,
             "ingested_at":           now,
             "approved_at":           None,
             "pushed_at":             None,
@@ -289,6 +294,8 @@ class MongoStagingStore:
             "has_embeddings":         False,
             "has_partial_embeddings": False,
             "kb_name":                new_meta.get("kb_name", "default"),
+            "usecase_id":             new_meta.get("usecase_id") or None,
+            "agent_filter":           new_meta.get("agent_filter") or None,
             "ingested_at":            now,
             "approved_at":            None,
             "pushed_at":              None,
@@ -409,6 +416,36 @@ class MongoStagingStore:
         return results
 
 
+    def get_chunks_by_usecase(
+        self,
+        usecase_id: str,
+        agent_filter: str,
+        status: str | None = "pushed",
+    ) -> list[dict]:
+        """
+        Return all chunk dicts for docs matching (usecase_id, agent_filter).
+
+        Optionally filter by doc status (default: pushed docs only).
+        Used for JSONL export to external embedding pipelines.
+        """
+        query: dict[str, Any] = {
+            "usecase_id":   usecase_id,
+            "agent_filter": agent_filter,
+        }
+        if status:
+            query["status"] = status
+        doc_ids = [d["_id"] for d in self._docs.find(query, {"_id": 1})]
+        if not doc_ids:
+            return []
+
+        chunks = []
+        for cd in self._chunks.find({"doc_id": {"$in": doc_ids}}):
+            cd["chunk_id"] = str(cd.pop("_id"))
+            cd.pop("doc_id", None)
+            chunks.append(cd)
+        return chunks
+
+
 # ---------------------------------------------------------------------------
 # KBLedger — permanent record of pushed documents for drift detection
 # ---------------------------------------------------------------------------
@@ -443,6 +480,9 @@ class KBLedger:
         self._coll.create_index("source_path")
         self._coll.create_index("drift_status")
         self._coll.create_index("pushed_at")
+        self._coll.create_index("usecase_id")
+        self._coll.create_index("agent_filter")
+        self._coll.create_index([("usecase_id", ASCENDING), ("agent_filter", ASCENDING)])
         self._snaps.create_index("created_at")
 
     def record_push(
@@ -456,6 +496,8 @@ class KBLedger:
         tags: list[str],
         quality_score: float,
         kb_name: str = "default",
+        usecase_id: str | None = None,
+        agent_filter: str | None = None,
     ) -> None:
         """
         Record (or update) a document in the ledger after a successful push.
@@ -486,6 +528,8 @@ class KBLedger:
             "tags":            tags,
             "quality_score":   quality_score,
             "kb_name":         kb_name,
+            "usecase_id":      usecase_id or None,
+            "agent_filter":    agent_filter or None,
             "pushed_at":       now,
             "drift_status":    "current",
             "drift_checked_at": None,
@@ -667,6 +711,28 @@ class KBLedger:
             results.append(doc)
         return results
 
+    def list_docs_by_usecase(
+        self,
+        usecase_id: str,
+        agent_filter: str,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Return kb_documents records for a specific usecase+agent pair (newest first)."""
+        query: dict[str, Any] = {"usecase_id": usecase_id, "agent_filter": agent_filter}
+        results = []
+        for doc in self._coll.find(
+            query,
+            sort=[("pushed_at", DESCENDING)],
+            limit=limit,
+        ):
+            doc["doc_id"] = doc.pop("_id")
+            for key in ("pushed_at", "drift_checked_at"):
+                val = doc.get(key)
+                if isinstance(val, datetime):
+                    doc[key] = val.isoformat()
+            results.append(doc)
+        return results
+
     def record_snapshot(self, pushed_doc_ids: list[str]) -> str:
         """
         Store a point-in-time snapshot of the full KB ledger state.
@@ -746,11 +812,283 @@ class KBLedger:
 
 
 # ---------------------------------------------------------------------------
+# UsecaseLedger — tracks pushed content per (usecase_id, agent_filter) pair
+# ---------------------------------------------------------------------------
+
+class UsecaseLedger:
+    """
+    Tracks what has been pushed to the vector DB per (usecase_id, agent_filter) pair,
+    and manages Confluence page source registrations with refresh schedules.
+
+    Collections used:
+    - ``usecase_ledger``            — pushed chunk inventory per usecase+agent
+    - ``usecase_confluence_sources`` — registered page URLs and refresh schedules
+    """
+
+    def __init__(self, db: Database | None = None) -> None:
+        self._db = db or _get_db()
+        self._coll: Collection    = self._db[_coll_name(settings.mongodb_coll_usecase_ledger)]
+        self._sources: Collection = self._db[_coll_name(settings.mongodb_coll_usecase_confluence)]
+        self._ensure_indexes()
+
+    def _ensure_indexes(self) -> None:
+        self._coll.create_index("usecase_id")
+        self._coll.create_index("agent_filter")
+        self._coll.create_index(
+            [("usecase_id", ASCENDING), ("agent_filter", ASCENDING)], unique=True
+        )
+        self._sources.create_index("usecase_id")
+        self._sources.create_index("agent_filter")
+        self._sources.create_index(
+            [("usecase_id", ASCENDING), ("agent_filter", ASCENDING)], unique=True
+        )
+        self._sources.create_index("next_refresh_at")
+
+    @staticmethod
+    def _make_id(usecase_id: str, agent_filter: str) -> str:
+        return f"{usecase_id}|{agent_filter}"
+
+    # ------------------------------------------------------------------
+    # Usecase ledger write operations
+    # ------------------------------------------------------------------
+
+    def record_push(
+        self,
+        usecase_id: str,
+        agent_filter: str,
+        kb_name: str,
+        doc_ids: list[str],
+        chunk_ids: list[str],
+    ) -> None:
+        """Upsert the usecase ledger entry after a successful vector push."""
+        now = datetime.now(timezone.utc)
+        entry_id = self._make_id(usecase_id, agent_filter)
+        self._coll.update_one(
+            {"_id": entry_id},
+            {
+                "$set": {
+                    "usecase_id":      usecase_id,
+                    "agent_filter":    agent_filter,
+                    "kb_name":         kb_name,
+                    "last_pushed_at":  now,
+                    "updated_at":      now,
+                    "chunk_count":     0,  # recalculated below
+                },
+                "$setOnInsert": {"created_at": now},
+                "$addToSet": {
+                    "doc_ids":   {"$each": doc_ids},
+                    "chunk_ids": {"$each": chunk_ids},
+                },
+            },
+            upsert=True,
+        )
+        # Recalculate chunk_count from the actual stored array length
+        entry = self._coll.find_one({"_id": entry_id}, {"chunk_ids": 1})
+        if entry:
+            count = len(entry.get("chunk_ids") or [])
+            self._coll.update_one({"_id": entry_id}, {"$set": {"chunk_count": count}})
+
+    def remove_chunks(
+        self,
+        usecase_id: str,
+        agent_filter: str,
+        chunk_ids: list[str],
+    ) -> None:
+        """Remove specific chunk_ids from a usecase ledger entry."""
+        entry_id = self._make_id(usecase_id, agent_filter)
+        self._coll.update_one(
+            {"_id": entry_id},
+            {
+                "$pull": {"chunk_ids": {"$in": chunk_ids}},
+                "$set":  {"updated_at": datetime.now(timezone.utc)},
+            },
+        )
+        entry = self._coll.find_one({"_id": entry_id}, {"chunk_ids": 1})
+        if entry:
+            count = len(entry.get("chunk_ids") or [])
+            self._coll.update_one({"_id": entry_id}, {"$set": {"chunk_count": count}})
+
+    # ------------------------------------------------------------------
+    # Usecase ledger read operations
+    # ------------------------------------------------------------------
+
+    def get_entry(self, usecase_id: str, agent_filter: str) -> dict[str, Any] | None:
+        """Return the ledger entry for a usecase+agent pair, or None."""
+        entry = self._coll.find_one({"_id": self._make_id(usecase_id, agent_filter)})
+        if entry is None:
+            return None
+        entry.pop("_id", None)
+        for key in ("last_pushed_at", "last_ingested_at", "created_at", "updated_at"):
+            val = entry.get(key)
+            if isinstance(val, datetime):
+                entry[key] = val.isoformat()
+        return entry
+
+    def list_entries(self) -> list[dict[str, Any]]:
+        """Return all usecase ledger entries (summary — excludes full chunk_ids list)."""
+        results = []
+        for entry in self._coll.find({}, {"chunk_ids": 0}, sort=[("updated_at", DESCENDING)]):
+            entry.pop("_id", None)
+            for key in ("last_pushed_at", "last_ingested_at", "created_at", "updated_at"):
+                val = entry.get(key)
+                if isinstance(val, datetime):
+                    entry[key] = val.isoformat()
+            results.append(entry)
+        return results
+
+    def get_distinct_usecases(self) -> list[str]:
+        """Return sorted list of distinct usecase_id values."""
+        return sorted(v for v in self._coll.distinct("usecase_id") if v)
+
+    def get_agent_filters_for_usecase(self, usecase_id: str) -> list[str]:
+        """Return sorted agent_filter values for a specific usecase_id."""
+        return sorted(
+            v for v in self._coll.distinct("agent_filter", {"usecase_id": usecase_id}) if v
+        )
+
+    def get_chunk_ids(self, usecase_id: str, agent_filter: str) -> list[str]:
+        """Return the live chunk_ids for a usecase+agent pair."""
+        entry = self._coll.find_one(
+            {"_id": self._make_id(usecase_id, agent_filter)}, {"chunk_ids": 1}
+        )
+        return list(entry.get("chunk_ids") or []) if entry else []
+
+    # ------------------------------------------------------------------
+    # Confluence source management
+    # ------------------------------------------------------------------
+
+    def upsert_confluence_source(
+        self,
+        usecase_id: str,
+        agent_filter: str,
+        kb_name: str,
+        page_urls: list[str],
+        max_depth: int = -1,
+        extra_tags: list[str] | None = None,
+        refresh_cron: str | None = None,
+    ) -> None:
+        """Register or update Confluence page URLs for a usecase+agent pair."""
+        now = datetime.now(timezone.utc)
+        next_refresh: datetime | None = None
+        if refresh_cron:
+            try:
+                from croniter import croniter
+                next_refresh = croniter(refresh_cron, now).get_next(datetime)
+            except Exception:
+                pass
+
+        self._sources.update_one(
+            {"usecase_id": usecase_id, "agent_filter": agent_filter},
+            {
+                "$set": {
+                    "usecase_id":      usecase_id,
+                    "agent_filter":    agent_filter,
+                    "kb_name":         kb_name,
+                    "page_urls":       page_urls,
+                    "max_depth":       max_depth,
+                    "extra_tags":      extra_tags or [],
+                    "refresh_cron":    refresh_cron or None,
+                    "next_refresh_at": next_refresh,
+                    "updated_at":      now,
+                },
+                "$setOnInsert": {
+                    "created_at":      now,
+                    "last_refresh_at": None,
+                    "refresh_status":  "idle",
+                    "refresh_error":   None,
+                },
+            },
+            upsert=True,
+        )
+
+    def get_confluence_source(
+        self, usecase_id: str, agent_filter: str
+    ) -> dict[str, Any] | None:
+        """Return the Confluence source config for a usecase+agent pair, or None."""
+        doc = self._sources.find_one({"usecase_id": usecase_id, "agent_filter": agent_filter})
+        if doc is None:
+            return None
+        doc["source_id"] = str(doc.pop("_id"))
+        for key in ("last_refresh_at", "next_refresh_at", "created_at", "updated_at"):
+            val = doc.get(key)
+            if isinstance(val, datetime):
+                doc[key] = val.isoformat()
+        return doc
+
+    def list_confluence_sources(self) -> list[dict[str, Any]]:
+        """Return all registered Confluence source configs."""
+        results = []
+        for doc in self._sources.find({}, sort=[("usecase_id", ASCENDING)]):
+            doc["source_id"] = str(doc.pop("_id"))
+            for key in ("last_refresh_at", "next_refresh_at", "created_at", "updated_at"):
+                val = doc.get(key)
+                if isinstance(val, datetime):
+                    doc[key] = val.isoformat()
+            results.append(doc)
+        return results
+
+    def get_sources_due_for_refresh(self) -> list[dict[str, Any]]:
+        """Return source configs where next_refresh_at <= now and not currently running."""
+        now = datetime.now(timezone.utc)
+        query = {
+            "next_refresh_at": {"$lte": now},
+            "refresh_status":  {"$ne": "running"},
+        }
+        results = []
+        for doc in self._sources.find(query):
+            doc["source_id"] = str(doc.pop("_id"))
+            results.append(doc)
+        return results
+
+    def mark_refresh_running(self, source_id: str) -> None:
+        from bson import ObjectId
+        self._sources.update_one(
+            {"_id": ObjectId(source_id)},
+            {"$set": {"refresh_status": "running", "refresh_error": None}},
+        )
+
+    def mark_refresh_done(self, source_id: str) -> None:
+        from bson import ObjectId
+        now = datetime.now(timezone.utc)
+        self._sources.update_one(
+            {"_id": ObjectId(source_id)},
+            {"$set": {
+                "refresh_status":  "idle",
+                "last_refresh_at": now,
+                "refresh_error":   None,
+            }},
+        )
+
+    def mark_refresh_failed(self, source_id: str, error: str) -> None:
+        from bson import ObjectId
+        self._sources.update_one(
+            {"_id": ObjectId(source_id)},
+            {"$set": {
+                "refresh_status": "failed",
+                "refresh_error":  error,
+                "next_refresh_at": None,
+            }},
+        )
+
+    def update_next_refresh(self, source_id: str, cron_expr: str) -> None:
+        """Compute and store the next fire time from a cron expression."""
+        from bson import ObjectId
+        from croniter import croniter
+        now = datetime.now(timezone.utc)
+        next_dt = croniter(cron_expr, now).get_next(datetime)
+        self._sources.update_one(
+            {"_id": ObjectId(source_id)},
+            {"$set": {"next_refresh_at": next_dt}},
+        )
+
+
+# ---------------------------------------------------------------------------
 # Module-level singletons (lazy)
 # ---------------------------------------------------------------------------
 
 _staging: MongoStagingStore | None = None
 _ledger: KBLedger | None = None
+_usecase_ledger: UsecaseLedger | None = None
 
 
 def get_staging() -> MongoStagingStore:
@@ -767,3 +1105,11 @@ def get_ledger() -> KBLedger:
     if _ledger is None:
         _ledger = KBLedger()
     return _ledger
+
+
+def get_usecase_ledger() -> UsecaseLedger:
+    """Return (or create) the shared UsecaseLedger instance."""
+    global _usecase_ledger
+    if _usecase_ledger is None:
+        _usecase_ledger = UsecaseLedger()
+    return _usecase_ledger

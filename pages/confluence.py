@@ -110,6 +110,21 @@ extra_tags_raw = st.text_input(
 )
 extra_tags = [t.strip() for t in extra_tags_raw.split(",") if t.strip()]
 
+# Use case tracking — optional for Confluence imports; enables Use Case Ledger entry
+uc_col1, uc_col2 = st.columns(2)
+with uc_col1:
+    conf_usecase_id = st.text_input(
+        "Use case ID  *(optional)*",
+        placeholder="GENAI1597_SSOP",
+        help="When set, staged pages are tracked in the Use Case Ledger under this identifier.",
+    )
+with uc_col2:
+    conf_agent_filter = st.text_input(
+        "Agent filter  *(optional)*",
+        placeholder="ssop_cloud_operations_knowledge_agent",
+        help="When set along with Use case ID, enables ledger tracking and refresh scheduling.",
+    )
+
 # ── Output format ─────────────────────────────────────────────────────────────
 
 st.divider()
@@ -217,13 +232,33 @@ if st.button(
                 from pipeline.ingest import ingest_jsonl
                 buf = io.BytesIO(jsonl_bytes)
                 buf.name = filename
+                _uc_id = conf_usecase_id.strip() or None
+                _ag_flt = conf_agent_filter.strip() or None
                 result = ingest_jsonl(
                     source=buf,
                     batch_name=filename,
                     extra_tags=extra_tags,
                     kb_name=kb_name.strip() or "default",
+                    usecase_id=_uc_id,
+                    agent_filter=_ag_flt,
                 )
                 st.session_state["confluence_import_result"] = result
+
+                # Register this crawl in the Use Case Ledger so it can be
+                # scheduled for periodic refresh
+                if _uc_id and _ag_flt:
+                    try:
+                        from pipeline.mongo_store import get_usecase_ledger
+                        get_usecase_ledger().upsert_confluence_source(
+                            usecase_id=_uc_id,
+                            agent_filter=_ag_flt,
+                            kb_name=kb_name.strip() or "default",
+                            page_urls=[page_url.strip()],
+                            max_depth=int(max_depth),
+                            extra_tags=extra_tags,
+                        )
+                    except Exception as uc_exc:
+                        st.warning(f"Could not register Use Case Ledger source: {uc_exc}")
             except Exception as exc:
                 st.error(f"Staging failed: {exc}")
 
