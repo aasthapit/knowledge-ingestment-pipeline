@@ -147,7 +147,7 @@ def split_doc(source_doc_id: str, chunk_ids: list[str], new_title: str) -> str |
         "quality_flags":  meta.get("quality_flags", []),
         "suggested_tags": meta.get("suggested_tags", []),
         "schema_type":    meta.get("schema_type", ""),
-        "kb_name":        meta.get("kb_name", "default"),
+        "kb_id":          meta.get("kb_id"),
     }
     moved = staging.split_doc(source_doc_id, new_doc_id, chunk_ids, new_meta)
     logger.info(
@@ -175,29 +175,47 @@ def reject_doc(doc_id: str, reason: str = "") -> bool:
 # ---------------------------------------------------------------------------
 
 def push_approved(
+    corpus_id: str,
     doc_id: str | None = None,
     remove_after_push: bool = False,
 ) -> dict[str, Any]:
     """
-    Embed all approved chunks and upsert them into the configured vector backend.
+    Embed all approved chunks from a corpus's KBs and push to the corpus's
+    configured vector store.
 
     Parameters
     ----------
+    corpus_id:
+        The corpus that provides the usecase/agent context and vector store target.
+        All approved staging docs whose kb_id belongs to this corpus are pushed.
     doc_id:
         If given, push only this specific document (must be approved).
-        If None, push all approved documents.
     remove_after_push:
         Whether to delete staging docs/chunks after a successful push.
-        Defaults to False so staging data is retained for audit and JSONL export.
 
     Returns
     -------
     dict
-        Summary: ``{"pushed_docs": int, "pushed_chunks": int, "errors": list}``
+        ``{"pushed_docs": int, "pushed_chunks": int, "errors": list}``
     """
     from pipeline.chunker import Chunk
+    from pipeline.vector_store import get_vector_store_client
 
-    staging = _staging()
+    staging  = _staging()
+    cs       = mongo_store.get_corpus_store()
+    vs_store = mongo_store.get_vs_config_store()
+
+    corpus = cs.get(corpus_id)
+    if not corpus:
+        return {"pushed_docs": 0, "pushed_chunks": 0, "errors": [f"Corpus {corpus_id} not found."]}
+
+    usecase_id   = corpus.get("usecase_id") or None
+    agent_filter = corpus.get("agent_filter") or None
+    kb_ids       = corpus.get("kb_ids") or []
+    vs_id        = corpus.get("vector_store_id") or "default"
+
+    vs_config = vs_store.get(vs_id) or vs_store.get("default")
+    vector_client = get_vector_store_client(vs_config or {})
 
     # Decide which docs to push
     if doc_id:
@@ -205,19 +223,30 @@ def push_approved(
         if not meta:
             return {"pushed_docs": 0, "pushed_chunks": 0, "errors": [f"Doc {doc_id} not found."]}
         if meta.get("status") != "approved":
-            return {"pushed_docs": 0, "pushed_chunks": 0, "errors": [f"Doc {doc_id} is not approved (status={meta.get('status')})."]}
+            return {
+                "pushed_docs": 0, "pushed_chunks": 0,
+                "errors": [f"Doc {doc_id} is not approved (status={meta.get('status')})."],
+            }
         doc_ids = [doc_id]
     else:
-        doc_ids = staging.get_approved()
+        # Collect approved docs across all KBs in this corpus
+        all_approved = staging.get_approved()
+        if kb_ids:
+            approved_meta = {d["doc_id"]: d for d in staging.list_all() if d["doc_id"] in all_approved}
+            doc_ids = [did for did in all_approved if approved_meta.get(did, {}).get("kb_id") in kb_ids]
+        else:
+            doc_ids = all_approved
 
     if not doc_ids:
-        logger.info("No approved documents to push.")
+        logger.info("No approved documents to push for corpus %s.", corpus_id)
         return {"pushed_docs": 0, "pushed_chunks": 0, "errors": []}
 
     pushed_docs = 0
     pushed_chunks = 0
     pushed_doc_ids: list[str] = []
     errors: list[str] = []
+
+    vector_client.ensure_index()
 
     for did in doc_ids:
         try:
@@ -226,8 +255,6 @@ def push_approved(
                 logger.warning("Doc %s has no staged chunks — skipping.", did)
                 continue
 
-            # Reconstruct Chunk objects
-            # JSONL imports may have pre-computed embeddings stored in _embedding
             chunks: list[Chunk] = []
             precomputed: list[list[float] | None] = []
             for cd in chunk_dicts:
@@ -241,40 +268,32 @@ def push_approved(
                     metadata=cd.get("metadata", {}),
                 )
                 chunks.append(c)
-                precomputed.append(cd.get("_embedding"))  # None if not present
+                precomputed.append(cd.get("_embedding"))
 
-            # Embed only chunks that don't already have a vector
             needs_embed = [i for i, v in enumerate(precomputed) if v is None]
             if needs_embed:
                 logger.info("Embedding %d/%d chunks for doc %s …", len(needs_embed), len(chunks), did)
-                sub_chunks = [chunks[i] for i in needs_embed]
-                sub_vectors = embedder.embed_chunks(sub_chunks)
+                sub_vectors = embedder.embed_chunks([chunks[i] for i in needs_embed])
                 for idx, vec in zip(needs_embed, sub_vectors):
                     precomputed[idx] = vec
             else:
                 logger.info("Reusing %d pre-computed embeddings for doc %s.", len(chunks), did)
 
-            vectors = [v for v in precomputed]   # type: ignore[assignment]
+            vectors = [v for v in precomputed]  # type: ignore[assignment]
 
-            # Quality score for this doc (stored in staging meta)
             doc_meta = staging.get_doc_meta(did) or {}
             try:
                 qs_value = float(doc_meta.get("quality_score", 1.0))
             except (ValueError, TypeError):
                 qs_value = 1.0
 
-            # Push to Redis
-            from pipeline import redis_store
-            redis_store.create_index()
-            redis_store.upsert_chunks(chunks, vectors)
+            vector_client.upsert_chunks(chunks, vectors)
 
             pushed_docs += 1
             pushed_chunks += len(chunks)
             pushed_doc_ids.append(did)
 
-            # Record push in the KB ledger for drift tracking
-            uc_id  = doc_meta.get("usecase_id") or None
-            ag_flt = doc_meta.get("agent_filter") or None
+            kb_id = doc_meta.get("kb_id") or None
             try:
                 ledger = mongo_store.get_ledger()
                 ledger.record_push(
@@ -286,21 +305,20 @@ def push_approved(
                     chunk_ids=[c.chunk_id for c in chunks],
                     tags=doc_meta.get("suggested_tags") or [],
                     quality_score=qs_value,
-                    kb_name=doc_meta.get("kb_name", "default"),
-                    usecase_id=uc_id,
-                    agent_filter=ag_flt,
+                    kb_id=kb_id,
+                    usecase_id=usecase_id,
+                    agent_filter=agent_filter,
                 )
             except Exception as ledger_exc:
                 logger.warning("Could not record push to ledger: %s", ledger_exc)
 
-            # Update usecase-level ledger when usecase_id + agent_filter are set
-            if uc_id and ag_flt:
+            if usecase_id and agent_filter:
                 try:
                     uc_ledger = mongo_store.get_usecase_ledger()
                     uc_ledger.record_push(
-                        usecase_id=uc_id,
-                        agent_filter=ag_flt,
-                        kb_name=doc_meta.get("kb_name", "default"),
+                        usecase_id=usecase_id,
+                        agent_filter=agent_filter,
+                        kb_name=kb_id or "default",
                         doc_ids=[did],
                         chunk_ids=[c.chunk_id for c in chunks],
                     )
@@ -309,7 +327,6 @@ def push_approved(
 
             staging.mark_pushed(did)
 
-            # Sync manifest entry status for every manifest referencing this doc_id
             try:
                 from datetime import datetime as _dt, timezone as _tz
                 from pipeline.manifests import get_manifest_manager
@@ -334,19 +351,16 @@ def push_approved(
             errors.append(f"{did}: {exc}")
 
     if pushed_docs > 0:
-        # Store a point-in-time snapshot of the full KB state in MongoDB
         try:
             snap_id = mongo_store.get_ledger().record_snapshot(pushed_doc_ids)
             logger.info("Ledger snapshot %s recorded (%d docs pushed)", snap_id, len(pushed_doc_ids))
         except Exception as snap_exc:
             logger.warning("Could not record ledger snapshot: %s", snap_exc)
 
-        # Optionally also write a CSV file if LEDGER_OUTPUT_DIR is configured
         if settings.ledger_output_dir:
             try:
                 from pipeline.exporter import export_ledger_csv
-                all_records = mongo_store.get_ledger().list_docs(limit=2000)
-                csv_path = export_ledger_csv(all_records)
+                csv_path = export_ledger_csv(mongo_store.get_ledger().list_docs(limit=2000))
                 logger.info("Ledger CSV written to %s", csv_path)
             except Exception as ledger_exc:
                 logger.warning("Could not export ledger CSV: %s", ledger_exc)

@@ -461,56 +461,15 @@ def import_jsonl(
     batch_name: str | None = None,
     extra_tags: list[str] | None = None,
     progress_cb: Callable[[int, int], None] | None = None,
-    kb_name: str = "default",
-    usecase_id: str | None = None,
-    agent_filter: str | None = None,
-    require_usecase: bool = False,
+    kb_id: str | None = None,
     field_map: dict[str, str] | None = None,
     tags_static: list[str] | None = None,
     section_join: str = " > ",
     manifest_id: str | None = None,
 ) -> dict[str, Any]:
     """
-    Parse an entire JSONL file and stage all chunks as a single import batch.
-
-    The batch is stored as one entry in :class:`~pipeline.mongo_store.MongoStagingStore`
-    with ``status="approved"`` (JSONL imports are treated as pre-vetted data).
-
-    Parameters
-    ----------
-    source:
-        File path (str / Path) or a file-like object (e.g. ``BytesIO`` from
-        Streamlit's file uploader).
-    batch_name:
-        Human-readable label for this import. Defaults to the filename.
-    extra_tags:
-        Additional tags applied to every chunk.
-    progress_cb:
-        Optional ``progress_cb(done: int, total: int)`` called after each
-        1 000-chunk batch to allow UI progress updates.
-        ``total`` is ``-1`` when the file size is unknown.
-    kb_name:
-        Logical knowledge base name for ledger grouping and drift tracking.
-    usecase_id:
-        Business use-case identifier (e.g. ``"GENAI1597_SSOP"``). Required
-        when ``require_usecase=True`` or when the schema is ``"crawler"``.
-        Falls back to the first record's ``usecase_id`` field if not supplied.
-    agent_filter:
-        Target agent/persona identifier. Same requirements as ``usecase_id``.
-    require_usecase:
-        When True, raise ``ValueError`` if either ``usecase_id`` or
-        ``agent_filter`` cannot be resolved.
-    field_map:
-        Optional dict mapping pipeline field names to source record keys
-        (dot-notation supported), e.g. ``{"content": "body", "source": "url"}``.
-        When supplied, auto-schema detection is bypassed and every record is
-        mapped using this definition.  Recognised target fields:
-        ``content``, ``source``, ``title``, ``section``, ``chunk_id``,
-        ``tags``, ``embedding``.
-    tags_static:
-        Additional tags applied to every chunk when using ``field_map``.
-    section_join:
-        Separator used when the section field resolves to a list (default ``" > "``).
+    Parse an entire JSONL file and stage all chunks as a single import batch
+    associated with a Knowledge Base (``kb_id``).
 
     Returns
     -------
@@ -569,18 +528,6 @@ def import_jsonl(
         return {}
 
     first_rec = _peek_first()
-    first_schema = detect_schema(first_rec)
-
-    # Resolve usecase_id / agent_filter from parameters or first-record fields
-    resolved_usecase_id   = usecase_id   or first_rec.get("usecase_id", "") or ""
-    resolved_agent_filter = agent_filter or first_rec.get("agent_filter", "") or ""
-
-    if require_usecase or first_schema == "crawler":
-        if not resolved_usecase_id or not resolved_agent_filter:
-            raise ValueError(
-                "JSONL import requires usecase_id and agent_filter. "
-                "Pass them as parameters or ensure every record contains these fields."
-            )
 
     # Quality signal accumulators (filled during the stream loop below)
     from pipeline.quality import (
@@ -731,9 +678,7 @@ def import_jsonl(
         "quality_passed":         int(quality_passed),
         "quality_flags":          _json.dumps(quality_flags),
         "status":                 status,
-        "kb_name":                kb_name,
-        "usecase_id":             resolved_usecase_id or None,
-        "agent_filter":           resolved_agent_filter or None,
+        "kb_id":                  kb_id or None,
         "age_days":               age_days,
         "is_stale":               is_stale,
         "chunks_too_short":       n_too_short,
@@ -765,6 +710,7 @@ def import_jsonl(
                 source_type="jsonl",
                 source_ref=batch_name or "",
                 title=f"JSONL import — {batch_name}",
+                kb_id=kb_id,
                 status=status,
             )
         except Exception as _manifest_exc:

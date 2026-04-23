@@ -5,6 +5,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routers import status, ingest, review, search, confluence, ledger, manifests, corpus
+from api.routers import kb as kb_router
+from api.routers import vector_stores as vs_router
 
 app = FastAPI(title="Knowledge Pipeline API", version="1.0.0")
 
@@ -24,6 +26,8 @@ app.include_router(confluence.router, prefix="/api/confluence", tags=["confluenc
 app.include_router(ledger.router, prefix="/api/ledger", tags=["ledger"])
 app.include_router(manifests.router, prefix="/api/manifests", tags=["manifests"])
 app.include_router(corpus.router, prefix="/api/corpus", tags=["corpus"])
+app.include_router(kb_router.router, prefix="/api", tags=["Knowledge Bases"])
+app.include_router(vs_router.router, prefix="/api", tags=["Vector Stores"])
 
 
 @app.on_event("startup")

@@ -11,9 +11,10 @@ router = APIRouter()
 
 
 @router.get("/")
-def list_docs(status: str | None = None):
+def list_docs(status: str | None = None, kb_id: str | None = None):
     from pipeline.review import list_all_docs
-    docs = list_all_docs()
+    from pipeline.mongo_store import get_staging
+    docs = get_staging().list_all(kb_id=kb_id)
     if status:
         docs = [d for d in docs if d.get("status") == status]
     return {"docs": docs}
@@ -76,6 +77,7 @@ def split_chunk(doc_id: str, chunk_id: str, req: SplitChunkRequest):
 def push(req: PushRequest):
     from pipeline.review import push_approved
     result = push_approved(
+        corpus_id=req.corpus_id,
         doc_id=req.doc_id,
         remove_after_push=req.remove_after_push,
     )

@@ -1,3 +1,4 @@
+"""Ingest router — document and JSONL upload into a Knowledge Base."""
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse
 from api.models import IngestURLRequest, IngestResult, SaveSchemaRequest, MessageResponse
@@ -13,9 +14,8 @@ async def ingest_document(
     file: UploadFile | None = File(default=None),
     url: str | None = Form(default=None),
     tags: str = Form(default=""),
-    kb_name: str = Form(default="default"),
-    usecase_id: str | None = Form(default=None),
-    agent_filter: str | None = Form(default=None),
+    kb_id: str | None = Form(default=None),
+    corpus_id: str | None = Form(default=None),
     auto_push: bool = Form(default=False),
 ):
     from pipeline.ingest import ingest_document as _ingest
@@ -32,9 +32,8 @@ async def ingest_document(
                 source=tmp_path,
                 extra_tags=tag_list,
                 auto_push=auto_push,
-                kb_name=kb_name,
-                usecase_id=usecase_id or "",
-                agent_filter=agent_filter or "",
+                kb_id=kb_id,
+                corpus_id=corpus_id,
             )
         finally:
             os.unlink(tmp_path)
@@ -43,9 +42,8 @@ async def ingest_document(
             source=url,
             extra_tags=tag_list,
             auto_push=auto_push,
-            kb_name=kb_name,
-            usecase_id=usecase_id or "",
-            agent_filter=agent_filter or "",
+            kb_id=kb_id,
+            corpus_id=corpus_id,
         )
     else:
         raise HTTPException(status_code=400, detail="Provide either a file or a url")
@@ -64,9 +62,7 @@ async def ingest_document(
 async def ingest_jsonl(
     file: UploadFile = File(...),
     tags: str = Form(default=""),
-    kb_name: str = Form(default="default"),
-    usecase_id: str | None = Form(default=None),
-    agent_filter: str | None = Form(default=None),
+    kb_id: str | None = Form(default=None),
     batch_name: str | None = Form(default=None),
     field_map: str | None = Form(default=None),  # JSON string
 ):
@@ -85,9 +81,7 @@ async def ingest_jsonl(
             source=tmp_path,
             batch_name=batch_name,
             extra_tags=tag_list,
-            kb_name=kb_name,
-            usecase_id=usecase_id or "",
-            agent_filter=agent_filter or "",
+            kb_id=kb_id,
             field_map=fm,
         )
     finally:
@@ -98,7 +92,7 @@ async def ingest_jsonl(
         quality_score=1.0 if result.get("quality_passed") else 0.0,
         quality_passed=result.get("quality_passed", False),
         quality_flags=[],
-        chunk_count=result.get("total", 0),
+        chunk_count=result.get("total_chunks", 0),
         tags=tag_list,
         detected_schema=result.get("schema"),
     )
@@ -129,8 +123,8 @@ async def peek_jsonl(
 @router.get("/schemas")
 def list_schemas():
     try:
-        from pipeline.jsonl_importer import _load_schemas
-        schemas = _load_schemas()
+        from pipeline.jsonl_importer import _load_custom_schemas
+        schemas = _load_custom_schemas()
         return {"schemas": [s.get("name") for s in schemas]}
     except Exception:
         return {"schemas": []}

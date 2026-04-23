@@ -33,14 +33,78 @@ class StatusResponse(BaseModel):
     kb_stats: dict[str, Any]
 
 
+# ── Knowledge Base ─────────────────────────────────────────────────────────────
+
+class CreateKBRequest(BaseModel):
+    name: str
+    source_type: str                      # "confluence" or "jsonl"
+    description: str = ""
+    confluence_urls: list[str] = []
+    max_depth: int = -1
+    refresh_cron: str | None = None
+    file_name: str | None = None
+    file_ref: str | None = None
+
+
+class UpdateKBRequest(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    confluence_urls: list[str] | None = None
+    max_depth: int | None = None
+    refresh_cron: str | None = None
+    file_name: str | None = None
+    file_ref: str | None = None
+
+
+# ── Vector Store Config ────────────────────────────────────────────────────────
+
+class CreateVectorStoreRequest(BaseModel):
+    name: str
+    vs_type: str = "custom"              # "redis" or "custom"
+    endpoint: str = ""
+    api_key: str = ""
+    collection: str = ""
+    extra: dict[str, Any] = {}
+
+
+class UpdateVectorStoreRequest(BaseModel):
+    name: str | None = None
+    endpoint: str | None = None
+    api_key: str | None = None
+    collection: str | None = None
+    extra: dict[str, Any] | None = None
+
+
+# ── Corpus ─────────────────────────────────────────────────────────────────────
+
+class CreateCorpusRequest(BaseModel):
+    name: str
+    description: str = ""
+    usecase_id: str = ""
+    agent_filter: str = ""
+    kb_ids: list[str] = []
+    vector_store_id: str = "default"
+
+
+class UpdateCorpusRequest(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    usecase_id: str | None = None
+    agent_filter: str | None = None
+    vector_store_id: str | None = None
+
+
+class CorpusKBRequest(BaseModel):
+    kb_ids: list[str]
+
+
 # ── Ingest ─────────────────────────────────────────────────────────────────────
 
 class IngestURLRequest(BaseModel):
     url: str
     tags: list[str] = []
-    kb_name: str = "default"
-    usecase_id: str | None = None
-    agent_filter: str | None = None
+    kb_id: str | None = None
+    corpus_id: str | None = None        # required for auto_push
     auto_push: bool = False
 
 
@@ -84,6 +148,7 @@ class SplitChunkRequest(BaseModel):
 
 
 class PushRequest(BaseModel):
+    corpus_id: str
     doc_id: str | None = None
     remove_after_push: bool = False
 
@@ -126,10 +191,8 @@ class ConfluenceCrawlRequest(BaseModel):
     ssl_verify: bool = False
     page_url: str
     max_depth: int = -1
-    kb_name: str = "default"
+    kb_id: str | None = None            # target Knowledge Base
     tags: list[str] = []
-    usecase_id: str | None = None
-    agent_filter: str | None = None
 
 
 # ── Ledger ─────────────────────────────────────────────────────────────────────
@@ -145,16 +208,13 @@ class DriftCheckResult(BaseModel):
 
 class CreateManifestRequest(BaseModel):
     name: str
-    usecase_id: str | None = None
-    agent_filter: str | None = None
-    kb_name: str = "default"
+    corpus_id: str | None = None
     description: str = ""
     tags: list[str] = []
 
 
 class SnapshotManifestRequest(BaseModel):
-    usecase_id: str
-    agent_filter: str
+    corpus_id: str
     manifest_name: str
 
 
@@ -162,9 +222,8 @@ class CreateFromSourcesRequest(BaseModel):
     name: str
     source_refs: list[str]
     source_type: str
-    usecase_id: str | None = None
-    agent_filter: str | None = None
-    kb_name: str = "default"
+    corpus_id: str | None = None
+    kb_id: str | None = None
     description: str = ""
     tags: list[str] = []
 
@@ -178,7 +237,7 @@ class RemoveManifestDocsRequest(BaseModel):
     doc_ids: list[str] | None = None
 
 
-# ── Use Case ───────────────────────────────────────────────────────────────────
+# ── Use Case (legacy — kept for existing usecase ledger / search compat) ───────
 
 class UpsertConfluenceSourceRequest(BaseModel):
     page_urls: list[str]
@@ -186,29 +245,3 @@ class UpsertConfluenceSourceRequest(BaseModel):
     max_depth: int = -1
     refresh_cron: str | None = None
     extra_tags: list[str] = []
-
-
-# ── Corpus ─────────────────────────────────────────────────────────────────────
-
-class CreateCorpusRequest(BaseModel):
-    name: str
-    description: str = ""
-    kb_names: list[str] = ["default"]
-    usecase_id: str = ""
-    agent_filter: str = ""
-    sources: list[dict] = []
-
-
-class UpdateCorpusRequest(BaseModel):
-    name: str | None = None
-    description: str | None = None
-    kb_names: list[str] | None = None
-    usecase_id: str | None = None
-    agent_filter: str | None = None
-    sources: list[dict] | None = None
-
-
-class CorpusDocsRequest(BaseModel):
-    doc_ids: list[str]
-    chunk_ids: list[str] = []
-    titles: list[str] = []

@@ -5,15 +5,16 @@ st.title("📚 Knowledge Base")
 st.caption("Add documents, review flagged content, and search your organisation's knowledge.")
 
 # ── Live stats ────────────────────────────────────────────────────────────────
-pending_count = approved_count = pushed_count = total_vectors = 0
+pending_count = approved_count = pushed_count = total_vectors = kb_count = 0
 mongo_ok = False
 
 try:
-    from pipeline.mongo_store import get_staging
+    from pipeline.mongo_store import get_staging, get_kb_store
     docs = get_staging().list_all()
     pending_count  = sum(1 for d in docs if d.get("status") == "pending_review")
     approved_count = sum(1 for d in docs if d.get("status") == "approved")
     pushed_count   = sum(1 for d in docs if d.get("status") == "pushed")
+    kb_count = len(get_kb_store().list_all())
     mongo_ok = True
 except Exception:
     pass
@@ -27,25 +28,30 @@ try:
 except Exception:
     pass
 
-c1, c2, c3, c4 = st.columns(4)
+c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric(
+    "Knowledge Bases",
+    kb_count,
+    help="Named document sources (Confluence or JSONL)",
+)
+c2.metric(
     "In Knowledge Base",
     f"{total_vectors:,}",
     help="Total document sections indexed and searchable",
 )
-c2.metric(
+c3.metric(
     "Needs Your Review",
     pending_count,
     delta=f"{pending_count} waiting" if pending_count else None,
     delta_color="inverse",
     help="Documents with quality flags waiting for a human decision",
 )
-c3.metric(
+c4.metric(
     "Ready to Push",
     approved_count,
     help="Approved and waiting to be embedded and pushed to the knowledge base",
 )
-c4.metric(
+c5.metric(
     "Pushed",
     pushed_count,
     help="Documents that have been embedded and are live in the knowledge base",

@@ -8,37 +8,25 @@ import streamlit as st
 st.title("Document Manifests")
 st.caption(
     "Name and version your document corpus. Track exactly which sources are in each "
-    "knowledge base, diff versions, re-ingest from a saved manifest, or remove a batch "
-    "of documents from the corpus in one operation."
+    "corpus version, diff two manifests to see what changed, or re-ingest from a saved manifest."
 )
 
 # ── Data loaders ──────────────────────────────────────────────────────────────
 
 
 @st.cache_data(ttl=30)
-def _load_manifests(
-    usecase_id: str | None = None,
-    agent_filter: str | None = None,
-    status: str | None = None,
-) -> list[dict]:
+def _load_manifests(corpus_id: str | None = None, status: str | None = None) -> list[dict]:
     from pipeline.manifests import get_manifest_manager
     return get_manifest_manager().list_manifests(
-        usecase_id=usecase_id or None,
-        agent_filter=agent_filter or None,
+        corpus_id=corpus_id or None,
         status=status or None,
     )
 
 
 @st.cache_data(ttl=30)
-def _load_usecases() -> list[str]:
-    from pipeline.mongo_store import get_usecase_ledger
-    return get_usecase_ledger().get_distinct_usecases()
-
-
-@st.cache_data(ttl=30)
-def _load_agent_filters(usecase_id: str) -> list[str]:
-    from pipeline.mongo_store import get_usecase_ledger
-    return get_usecase_ledger().get_agent_filters_for_usecase(usecase_id)
+def _load_corpora() -> list[dict]:
+    from pipeline.mongo_store import get_corpus_store
+    return get_corpus_store().list_all()
 
 
 # ── Connection guard ──────────────────────────────────────────────────────────
@@ -49,6 +37,14 @@ except Exception as _conn_exc:
     st.error(f"Could not connect to MongoDB: {_conn_exc}")
     st.info("Make sure MongoDB is running and `MONGODB_URI` is set in your `.env` file.")
     st.stop()
+
+try:
+    all_corpora = _load_corpora()
+except Exception:
+    all_corpora = []
+
+corpus_options = {"(all corpora)": None}
+corpus_options.update({c["name"]: c["corpus_id"] for c in all_corpora})
 
 # ── Tab layout ────────────────────────────────────────────────────────────────
 
@@ -67,30 +63,17 @@ tab_browse, tab_create, tab_diff, tab_reingest = st.tabs([
 with tab_browse:
     import pandas as pd
 
-    # ── Filters ───────────────────────────────────────────────────────────────
-    f_col1, f_col2, f_col3 = st.columns([2, 2, 1])
+    f_col1, f_col2 = st.columns([2, 1])
     with f_col1:
-        try:
-            uc_opts = ["(all)"] + _load_usecases()
-        except Exception:
-            uc_opts = ["(all)"]
-        browse_uc = st.selectbox("Use case", uc_opts, key="browse_uc")
+        browse_corpus = st.selectbox("Corpus", list(corpus_options.keys()), key="browse_corpus")
     with f_col2:
-        if browse_uc and browse_uc != "(all)":
-            af_opts = ["(all)"] + _load_agent_filters(browse_uc)
-        else:
-            af_opts = ["(all)"]
-        browse_af = st.selectbox("Agent filter", af_opts, key="browse_af")
-    with f_col3:
         browse_status = st.selectbox(
             "Status", ["(all)", "open", "frozen", "archived"], key="browse_status"
         )
 
-    # ── Manifest summary table ────────────────────────────────────────────────
     try:
         manifests = _load_manifests(
-            usecase_id=browse_uc if browse_uc != "(all)" else None,
-            agent_filter=browse_af if browse_af != "(all)" else None,
+            corpus_id=corpus_options.get(browse_corpus),
             status=browse_status if browse_status != "(all)" else None,
         )
     except Exception as exc:
@@ -103,19 +86,19 @@ with tab_browse:
         st.info("No manifests found. Use **Create / Snapshot** to create one.")
     else:
         rows = []
+        corpus_id_to_name = {c["corpus_id"]: c["name"] for c in all_corpora}
         for m in manifests:
             status = m.get("status", "")
             rows.append({
-                "manifest_id":   m.get("manifest_id", ""),
-                "Name":          m.get("name", ""),
-                "Use case":      m.get("usecase_id") or "—",
-                "Agent":         m.get("agent_filter") or "—",
-                "Status":        STATUS_ICONS.get(status, "?") + " " + status,
-                "Docs":          m.get("entry_count", 0),
-                "Pushed":        m.get("pushed_count", 0),
-                "Created":       (m.get("created_at") or "")[:10],
-                "Tags":          ", ".join(m.get("tags") or []),
-                "Created by":    m.get("created_by") or "—",
+                "manifest_id": m.get("manifest_id", ""),
+                "Name":        m.get("name", ""),
+                "Corpus":      corpus_id_to_name.get(m.get("corpus_id", ""), m.get("corpus_id", "—")),
+                "Status":      STATUS_ICONS.get(status, "?") + " " + status,
+                "Docs":        m.get("entry_count", 0),
+                "Pushed":      m.get("pushed_count", 0),
+                "Created":     (m.get("created_at") or "")[:10],
+                "Tags":        ", ".join(m.get("tags") or []),
+                "Created by":  m.get("created_by") or "—",
             })
 
         df = pd.DataFrame(rows)
@@ -144,8 +127,9 @@ with tab_browse:
                 st.subheader(f"Manifest: {mf['name']}")
                 if mf.get("description"):
                     st.caption(mf["description"])
+                corpus_label = corpus_id_to_name.get(mf.get("corpus_id", ""), mf.get("corpus_id", "—"))
+                st.caption(f"Corpus: **{corpus_label}**")
 
-                # Manifest-level actions
                 mf_status = mf.get("status", "")
                 act_col1, act_col2, act_col3 = st.columns([1, 1, 4])
                 with act_col1:
@@ -172,18 +156,14 @@ with tab_browse:
                         key="dl_manifest",
                     )
 
-                # Entry table
                 entries = mf.get("entries") or []
                 if not entries:
                     st.info("This manifest has no entries yet.")
                 else:
                     st.caption(f"{len(entries)} entries  ·  {mf.get('pushed_count', 0)} pushed")
                     ENTRY_STATUS_ICONS = {
-                        "pending":  "⏳",
-                        "staged":   "📥",
-                        "approved": "✅",
-                        "pushed":   "🚀",
-                        "removed":  "🗑️",
+                        "pending": "⏳", "staged": "📥", "approved": "✅",
+                        "pushed":  "🚀", "removed": "🗑️",
                     }
                     entry_rows = []
                     for e in entries:
@@ -194,6 +174,7 @@ with tab_browse:
                             "Title":       e.get("title", ""),
                             "Source type": e.get("source_type", ""),
                             "Source ref":  e.get("source_ref", ""),
+                            "KB":          e.get("kb_id", ""),
                             "Version":     e.get("version_id", ""),
                             "Staged":      (e.get("staged_at") or "")[:10],
                             "Pushed":      (e.get("pushed_at") or "")[:10],
@@ -208,16 +189,14 @@ with tab_browse:
                         key="entry_table",
                     )
 
-                    # Remove action for selected entry
                     sel_entry_rows = entry_sel.selection.rows if entry_sel else []
                     if sel_entry_rows:
-                        sel_entry = entry_rows[sel_entry_rows[0]]
-                        sel_doc_id = sel_entry.get("doc_id", "")
-                        sel_entry_status = sel_entry.get("Status", "")
+                        sel_entry   = entry_rows[sel_entry_rows[0]]
+                        sel_doc_id  = sel_entry.get("doc_id", "")
+                        sel_status  = sel_entry.get("Status", "")
 
-                        if sel_doc_id and "pushed" in sel_entry_status:
+                        if sel_doc_id and "pushed" in sel_status:
                             st.markdown("---")
-                            # Check cross-manifest references
                             other_manifests = [
                                 m for m in mm.find_manifests_by_doc_id(sel_doc_id)
                                 if m.get("manifest_id") != manifest_id_sel
@@ -260,38 +239,24 @@ with tab_create:
 
     # ── Snapshot current corpus ───────────────────────────────────────────────
     st.subheader("Snapshot current corpus")
-    st.caption("Save the current state of the knowledge base as a named, frozen manifest.")
+    st.caption("Save the current state of a corpus as a named, frozen manifest.")
 
     with st.form("snapshot_form"):
-        sn_col1, sn_col2 = st.columns(2)
-        with sn_col1:
-            try:
-                sn_uc_opts = _load_usecases()
-            except Exception:
-                sn_uc_opts = []
-            sn_usecase = st.selectbox(
-                "Use case ID *",
-                sn_uc_opts or ["—"],
-                key="sn_usecase",
-            )
-        with sn_col2:
-            sn_af_opts = _load_agent_filters(sn_usecase) if sn_usecase and sn_usecase != "—" else []
-            sn_agent = st.selectbox(
-                "Agent filter *",
-                sn_af_opts or ["—"],
-                key="sn_agent",
-            )
+        corpus_opts = {c["name"]: c["corpus_id"] for c in all_corpora}
+        sn_corpus = st.selectbox(
+            "Corpus *",
+            list(corpus_opts.keys()) or ["—"],
+            key="sn_corpus",
+        )
         sn_name = st.text_input("Manifest name *", placeholder="SSOP v2 — April 2026")
-        sn_desc = st.text_input("Description", placeholder="Stable corpus before model update")
+        sn_desc = st.text_input("Description",      placeholder="Stable corpus before model update")
         sn_tags = st.text_input("Tags (comma-separated)", placeholder="stable, pre-upgrade")
         sn_submitted = st.form_submit_button("Save as Frozen Manifest")
 
     if sn_submitted:
         sn_errors = []
-        if not sn_usecase or sn_usecase == "—":
-            sn_errors.append("Use case ID is required.")
-        if not sn_agent or sn_agent == "—":
-            sn_errors.append("Agent filter is required.")
+        if not sn_corpus or sn_corpus == "—":
+            sn_errors.append("Corpus is required.")
         if not sn_name.strip():
             sn_errors.append("Manifest name is required.")
         for e in sn_errors:
@@ -302,12 +267,8 @@ with tab_create:
                 try:
                     from pipeline.manifests import get_manifest_manager
                     mid = get_manifest_manager().snapshot_corpus_to_manifest(
-                        usecase_id=sn_usecase,
-                        agent_filter=sn_agent,
+                        corpus_id=corpus_opts[sn_corpus],
                         manifest_name=sn_name.strip(),
-                        description=sn_desc.strip(),
-                        created_by="ui",
-                        tags=tags_list,
                     )
                     st.success(f"Snapshot created: `{mid}`")
                     st.cache_data.clear()
@@ -333,11 +294,11 @@ with tab_create:
             placeholder="https://confluence.example.com/spaces/OPS/pages/12345678/Page",
             height=120,
         )
-        src_col1, src_col2 = st.columns(2)
-        with src_col1:
-            src_usecase = st.text_input("Use case ID", placeholder="GENAI1597_SSOP")
-        with src_col2:
-            src_agent = st.text_input("Agent filter", placeholder="ssop_cloud_operations_agent")
+        src_corpus_label = st.selectbox(
+            "Corpus",
+            list(corpus_opts.keys()) or ["—"],
+            key="src_corpus",
+        )
         src_desc = st.text_input("Description")
         src_tags = st.text_input("Tags (comma-separated)")
         src_submitted = st.form_submit_button("Create Manifest")
@@ -359,10 +320,8 @@ with tab_create:
                     name=src_name.strip(),
                     source_refs=refs,
                     source_type=src_type,
-                    usecase_id=src_usecase.strip() or None,
-                    agent_filter=src_agent.strip() or None,
+                    corpus_id=corpus_opts.get(src_corpus_label),
                     description=src_desc.strip(),
-                    created_by="ui",
                     tags=tags_list,
                 )
                 st.success(f"Manifest created with {len(refs)} pending entries: `{mid}`")
@@ -390,10 +349,15 @@ with tab_diff:
     else:
         import pandas as pd
 
-        manifest_options = {
-            f"{m['name']} ({(m.get('created_at') or '')[:10]})": m["manifest_id"]
-            for m in diff_manifests_list
-        }
+        corpus_id_to_name = {c["corpus_id"]: c["name"] for c in all_corpora}
+        manifest_options = {}
+        for m in diff_manifests_list:
+            corpus_label = corpus_id_to_name.get(m.get("corpus_id", ""), "")
+            label = f"{m['name']} ({(m.get('created_at') or '')[:10]})"
+            if corpus_label:
+                label += f" — {corpus_label}"
+            manifest_options[label] = m["manifest_id"]
+
         option_labels = list(manifest_options.keys())
 
         d_col1, d_col2 = st.columns(2)
@@ -428,12 +392,9 @@ with tab_diff:
                     n_unchanged = len(result["unchanged"])
 
                     mc1, mc2, mc3, mc4 = st.columns(4)
-                    mc1.metric("Added",     n_added,
-                               delta=n_added or None, delta_color="normal")
-                    mc2.metric("Removed",   n_removed,
-                               delta=-n_removed if n_removed else None, delta_color="inverse")
-                    mc3.metric("Changed",   n_changed,
-                               delta=n_changed or None, delta_color="off")
+                    mc1.metric("Added",     n_added,     delta=n_added or None, delta_color="normal")
+                    mc2.metric("Removed",   n_removed,   delta=-n_removed if n_removed else None, delta_color="inverse")
+                    mc3.metric("Changed",   n_changed,   delta=n_changed or None, delta_color="off")
                     mc4.metric("Unchanged", n_unchanged)
 
                     if n_added == 0 and n_removed == 0 and n_changed == 0:
@@ -500,10 +461,15 @@ with tab_reingest:
     if not ri_manifests:
         st.info("No active manifests found.")
     else:
-        ri_options = {
-            f"{m['name']} ({(m.get('created_at') or '')[:10]})": m["manifest_id"]
-            for m in ri_manifests
-        }
+        corpus_id_to_name = {c["corpus_id"]: c["name"] for c in all_corpora}
+        ri_options = {}
+        for m in ri_manifests:
+            corpus_label = corpus_id_to_name.get(m.get("corpus_id", ""), "")
+            label = f"{m['name']} ({(m.get('created_at') or '')[:10]})"
+            if corpus_label:
+                label += f" — {corpus_label}"
+            ri_options[label] = m["manifest_id"]
+
         ri_label = st.selectbox("Select manifest", list(ri_options.keys()), key="ri_sel")
         ri_mid   = ri_options[ri_label]
 

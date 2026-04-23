@@ -1,3 +1,4 @@
+"""Confluence crawl router — associates crawl results with a Knowledge Base."""
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from api.models import ConfluenceCrawlRequest
@@ -44,20 +45,19 @@ def crawl_confluence(req: ConfluenceCrawlRequest):
             result = ingest_jsonl(
                 source=tmp_path,
                 extra_tags=req.tags,
-                kb_name=req.kb_name,
-                usecase_id=req.usecase_id or "",
-                agent_filter=req.agent_filter or "",
+                kb_id=req.kb_id,
             )
             os.unlink(tmp_path)
 
-            if req.usecase_id and req.agent_filter:
+            # Update KB status if a kb_id was supplied
+            if req.kb_id:
                 try:
-                    from pipeline.mongo_store import get_usecase_ledger
-                    get_usecase_ledger().upsert_confluence_source(
-                        usecase_id=req.usecase_id,
-                        agent_filter=req.agent_filter,
-                        page_urls=[req.page_url],
-                    )
+                    from pipeline.mongo_store import get_kb_store
+                    ks = get_kb_store()
+                    doc_id = result.get("doc_id")
+                    if doc_id:
+                        ks.add_doc_ids(req.kb_id, [doc_id])
+                    ks.set_status(req.kb_id, "staging")
                 except Exception:
                     pass
 

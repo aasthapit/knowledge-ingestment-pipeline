@@ -138,9 +138,8 @@ def ingest_document(
     source: str | Path,
     extra_tags: list[str] | None = None,
     auto_push: bool = False,
-    kb_name: str = "default",
-    usecase_id: str | None = None,
-    agent_filter: str | None = None,
+    kb_id: str | None = None,
+    corpus_id: str | None = None,
     manifest_id: str | None = None,
 ) -> dict:
     """
@@ -164,14 +163,13 @@ def ingest_document(
     extra_tags:
         Additional tags merged with the auto-generated ones.
     auto_push:
-        If True, auto-approved documents are embedded and pushed immediately
-        without waiting for an explicit ``review push`` command.
-    kb_name:
-        Logical knowledge base name for ledger grouping and drift tracking.
-    usecase_id:
-        Business use-case identifier for the Use Case Ledger.
-    agent_filter:
-        Target agent/persona identifier for the Use Case Ledger.
+        If True, auto-approved documents are embedded and pushed immediately.
+        Requires ``corpus_id`` to resolve the vector store target.
+    kb_id:
+        Knowledge Base this document belongs to.
+    corpus_id:
+        Required when ``auto_push=True`` — provides usecase/agent context
+        and vector store target.
 
     Returns
     -------
@@ -234,9 +232,7 @@ def ingest_document(
         "suggested_tags":     json.dumps(tags),
         "chunk_count":        len(chunks),
         "status":             status,
-        "kb_name":            kb_name,
-        "usecase_id":         usecase_id or None,
-        "agent_filter":       agent_filter or None,
+        "kb_id":              kb_id or None,
         "age_days":           result.age_days,
         "is_stale":           result.is_stale,
         "chunks_too_short":   result.chunks_too_short,
@@ -273,14 +269,15 @@ def ingest_document(
                 source_type=citation.source_type,
                 source_ref=str(source),
                 title=citation.title,
+                kb_id=kb_id,
                 status=status,
             )
         except Exception as _manifest_exc:
             logger.warning("Could not associate doc with manifest: %s", _manifest_exc)
 
-    # 6 — Optional immediate push
-    if auto_push and result.passed:
-        push_result = push_approved(doc_id=doc_id)
+    # 6 — Optional immediate push (requires corpus_id for context)
+    if auto_push and result.passed and corpus_id:
+        push_result = push_approved(corpus_id=corpus_id, doc_id=doc_id)
         logger.info("Auto-pushed: %s", push_result)
 
     return {
@@ -306,24 +303,20 @@ def ingest_jsonl(
     batch_name: str | None = None,
     extra_tags: list[str] | None = None,
     progress_cb=None,
-    kb_name: str = "default",
-    usecase_id: str | None = None,
-    agent_filter: str | None = None,
-    require_usecase: bool = False,
+    kb_id: str | None = None,
     field_map: dict[str, str] | None = None,
     tags_static: list[str] | None = None,
     section_join: str = " > ",
     manifest_id: str | None = None,
 ) -> dict:
     """
-    Import a JSONL chunk file into the staging area.
+    Import a JSONL chunk file into the staging area under a specific Knowledge Base.
 
     Supports both the crawler schema (``text`` + ``page_url``) and the
     pipeline exporter schema (``content`` + ``source``).  Auto-detects
     which schema is in use from the first record.
 
-    Pre-computed embeddings in pipeline-schema files are reused automatically
-    so you don't pay for re-embedding.
+    Pre-computed embeddings in pipeline-schema files are reused automatically.
 
     Parameters
     ----------
@@ -335,15 +328,8 @@ def ingest_jsonl(
         Additional tags applied to every chunk.
     progress_cb:
         Optional ``progress_cb(done: int, total: int)`` for progress updates.
-    kb_name:
-        Logical knowledge base name for ledger grouping and drift tracking.
-    usecase_id:
-        Business use-case identifier. Required for crawler-schema files or
-        when ``require_usecase=True``.
-    agent_filter:
-        Target agent/persona identifier.
-    require_usecase:
-        When True, raise ``ValueError`` if usecase_id or agent_filter are missing.
+    kb_id:
+        Knowledge Base this import belongs to.
 
     Returns
     -------
@@ -358,10 +344,7 @@ def ingest_jsonl(
         batch_name=batch_name,
         extra_tags=extra_tags,
         progress_cb=progress_cb,
-        kb_name=kb_name,
-        usecase_id=usecase_id,
-        agent_filter=agent_filter,
-        require_usecase=require_usecase,
+        kb_id=kb_id,
         field_map=field_map,
         tags_static=tags_static,
         section_join=section_join,
@@ -369,22 +352,19 @@ def ingest_jsonl(
     )
 
 
-def export_usecase_jsonl(
-    usecase_id: str,
-    agent_filter: str,
+def export_kb_jsonl(
+    kb_id: str,
     output_path: str | Path | None = None,
     status: str | None = "pushed",
 ) -> dict:
     """
-    Export all chunks for a (usecase_id, agent_filter) pair to a JSONL file.
+    Export all chunks for a Knowledge Base to a JSONL file.
 
     Parameters
     ----------
-    usecase_id:    Business use-case identifier.
-    agent_filter:  Target agent/persona identifier.
-    output_path:   Write path. Defaults to a timestamped file in JSONL_OUTPUT_DIR.
-    status:        Filter docs by status (default: ``"pushed"``). Pass ``None``
-                   to include all statuses (approved + pending + pushed).
+    kb_id:        Knowledge Base ID.
+    output_path:  Write path. Defaults to a timestamped file in JSONL_OUTPUT_DIR.
+    status:       Filter docs by status (default: ``"pushed"``).
 
     Returns
     -------
@@ -394,19 +374,13 @@ def export_usecase_jsonl(
     from pipeline.exporter import export_chunks_as_jsonl
 
     staging = mongo_store.get_staging()
-    chunk_dicts = staging.get_chunks_by_usecase(usecase_id, agent_filter, status=status)
+    chunk_dicts = staging.get_chunks_by_kb(kb_id, status=status)
 
     if not chunk_dicts:
-        raise ValueError(
-            f"No chunks found for usecase_id={usecase_id!r}, "
-            f"agent_filter={agent_filter!r}, status={status!r}."
-        )
+        raise ValueError(f"No chunks found for kb_id={kb_id!r}, status={status!r}.")
 
     out = export_chunks_as_jsonl(chunk_dicts, output_path=output_path)
-    logger.info(
-        "Exported %d chunks for usecase=%s agent=%s → %s",
-        len(chunk_dicts), usecase_id, agent_filter, out,
-    )
+    logger.info("Exported %d chunks for kb_id=%s → %s", len(chunk_dicts), kb_id, out)
     return {"chunk_count": len(chunk_dicts), "output_path": str(out)}
 
 

@@ -61,10 +61,22 @@ def _split_by_delimiter(text: str) -> list[str]:
 
 # ── Load data ─────────────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=5)          # refresh every 5 s on rerun
-def _load_docs():
-    from pipeline import review as rev
-    return rev.list_all_docs()
+@st.cache_data(ttl=5)
+def _load_docs(kb_id: str | None = None):
+    from pipeline.mongo_store import get_staging
+    return get_staging().list_all(kb_id=kb_id)
+
+
+@st.cache_data(ttl=30)
+def _load_kbs() -> list[dict]:
+    from pipeline.mongo_store import get_kb_store
+    return get_kb_store().list_all()
+
+
+@st.cache_data(ttl=30)
+def _load_corpora() -> list[dict]:
+    from pipeline.mongo_store import get_corpus_store
+    return get_corpus_store().list_all()
 
 
 # ── Page ─────────────────────────────────────────────────────────────────────
@@ -72,9 +84,28 @@ def _load_docs():
 st.title("📋 Review Queue")
 st.caption("Inspect documents before they go into the knowledge base. Approve or reject each one.")
 
+# ── KB filter ─────────────────────────────────────────────────────────────────
+
+try:
+    all_kbs = _load_kbs()
+except Exception:
+    all_kbs = []
+
+kb_filter_opts = {"All Knowledge Bases": None}
+kb_filter_opts.update({kb["name"]: kb["kb_id"] for kb in all_kbs})
+
+col_kb_filter, _ = st.columns([2, 3])
+with col_kb_filter:
+    kb_filter_label = st.selectbox(
+        "Filter by Knowledge Base",
+        options=list(kb_filter_opts.keys()),
+        label_visibility="collapsed",
+    )
+active_kb_id = kb_filter_opts.get(kb_filter_label)
+
 # ── Metrics ───────────────────────────────────────────────────────────────────
 try:
-    all_docs = _load_docs()
+    all_docs = _load_docs(kb_id=active_kb_id)
 except Exception as exc:
     st.error(f"Could not load staged documents: {exc}")
     st.caption(
@@ -93,32 +124,49 @@ m2.metric("Approved",         len(approved), help="Ready to push to knowledge ba
 m3.metric("Rejected",         len(rejected))
 m4.metric("Total Staged",     len(all_docs))
 
+# Corpus options — needed both in the push panel and in per-doc push buttons
+try:
+    all_corpora = _load_corpora()
+except Exception:
+    all_corpora = []
+corpus_opts = {c["name"]: c["corpus_id"] for c in all_corpora}
+push_corpus_label: str = list(corpus_opts.keys())[0] if corpus_opts else ""
+
 # ── Push all approved ─────────────────────────────────────────────────────────
 if approved:
     st.divider()
-    col_push, col_info = st.columns([2, 3])
-    with col_push:
-        if st.button(
+
+    push_col, info_col = st.columns([3, 2])
+    with push_col:
+        push_corpus_label = st.selectbox(
+            "Push to corpus",
+            options=list(corpus_opts.keys()) or ["(no corpora — create one first)"],
+            help="The corpus defines the use case, agent filter, and target vector store.",
+            key="push_corpus_select",
+        )
+        push_corpus_id = corpus_opts.get(push_corpus_label)
+
+        if push_corpus_id and st.button(
             f"🚀  Push {len(approved)} approved document{'s' if len(approved) != 1 else ''} to Knowledge Base",
             type="primary",
             width="stretch",
         ):
             with st.spinner("Embedding and pushing …"):
                 from pipeline import review as rev
-                result = rev.push_approved()
-            if result["errors"]:
+                result = rev.push_approved(corpus_id=push_corpus_id)
+            if result.get("errors"):
                 for err in result["errors"]:
                     st.error(err)
             st.success(
-                f"✅  Pushed **{result['pushed_docs']}** document(s) — "
-                f"**{result['pushed_chunks']:,}** sections added to the knowledge base."
+                f"✅  Pushed **{result.get('pushed_docs', 0)}** document(s) — "
+                f"**{result.get('pushed_chunks', 0):,}** sections added to the knowledge base."
             )
             st.cache_data.clear()
             st.rerun()
-    with col_info:
+    with info_col:
         st.caption(
             "Pushing embeds the document sections and makes them searchable. "
-            "This may take a minute for large documents."
+            "The corpus determines the use case context and target vector DB."
         )
 
 # ── Filter tabs ───────────────────────────────────────────────────────────────
@@ -154,8 +202,7 @@ for doc in visible_docs:
     author      = doc.get("author", "")
     pages       = doc.get("page_count", "")
     url         = doc.get("url", "")
-    usecase_id  = doc.get("usecase_id") or ""
-    agent_flt   = doc.get("agent_filter") or ""
+    kb_id_doc   = doc.get("kb_id") or ""
     age_days    = doc.get("age_days")
     is_stale    = doc.get("is_stale", False)
     n_short     = _safe_int(doc.get("chunks_too_short", 0))
@@ -163,6 +210,7 @@ for doc in visible_docs:
     n_bplate    = _safe_int(doc.get("chunks_boilerplate", 0))
 
     src_icon = SOURCE_ICON.get(src_type, "📎")
+    kb_id_to_name = {kb["kb_id"]: kb["name"] for kb in all_kbs}
 
     with st.container(border=True):
         # ── Row 1: title + status badge ───────────────────────────────────
@@ -175,10 +223,9 @@ for doc in visible_docs:
             if pages:
                 meta_parts.append(f"{pages} pages")
             meta_parts.append(f"{chunks} sections")
-            if usecase_id:
-                meta_parts.append(f"🗂️ {usecase_id}")
-            if agent_flt:
-                meta_parts.append(f"🤖 {agent_flt}")
+            if kb_id_doc:
+                kb_label = kb_id_to_name.get(kb_id_doc, kb_id_doc[:8])
+                meta_parts.append(f"📂 {kb_label}")
             st.caption("  ·  ".join(p for p in meta_parts if p))
         with s_col:
             color = STATUS_COLOR.get(status, "gray")
@@ -439,16 +486,18 @@ for doc in visible_docs:
         else:
             btn_cols[0].button("✅  Approved", key=f"noop_approve_{doc_id}", disabled=True, width="stretch")
 
-        # Push single doc
+        # Push single doc — uses the corpus selected in the push panel above
         if status == "approved":
-            if btn_cols[1].button("🚀  Push now", key=f"push_{doc_id}", width="stretch"):
+            _single_corpus_id = corpus_opts.get(push_corpus_label) if approved else None
+            if btn_cols[1].button("🚀  Push now", key=f"push_{doc_id}", width="stretch",
+                                  disabled=not _single_corpus_id):
                 with st.spinner(f"Pushing {title} …"):
                     from pipeline import review as rev
-                    res = rev.push_approved(doc_id=doc_id)
-                if res["errors"]:
+                    res = rev.push_approved(corpus_id=_single_corpus_id, doc_id=doc_id)
+                if res.get("errors"):
                     st.error(res["errors"][0])
                 else:
-                    st.toast(f"Pushed {res['pushed_chunks']} sections", icon="🚀")
+                    st.toast(f"Pushed {res.get('pushed_chunks', 0)} sections", icon="🚀")
                 st.cache_data.clear()
                 st.rerun()
 

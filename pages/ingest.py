@@ -1,4 +1,4 @@
-"""Add Document — upload a file or provide a URL."""
+"""Add Document — upload a file or provide a URL, scoped to a Knowledge Base."""
 import os
 import tempfile
 from pathlib import Path
@@ -20,15 +20,46 @@ TYPE_LABELS = {
 }
 
 
+@st.cache_data(ttl=30)
+def _load_kbs() -> list[dict]:
+    from pipeline.mongo_store import get_kb_store
+    return get_kb_store().list_all()
 
 
 # ── Page ─────────────────────────────────────────────────────────────────────
 
 st.title("➕ Add a Document")
 st.caption(
-    "Upload a file, paste a web address, or import a JSONL bulk export. "
-    "The system will read it, check its quality, and queue it for the knowledge base."
+    "Upload a file, paste a web address, or import a JSONL bulk export into a Knowledge Base. "
+    "The system will read it, check its quality, and queue it for review."
 )
+
+# ── Knowledge Base selector ───────────────────────────────────────────────────
+
+try:
+    all_kbs = _load_kbs()
+except Exception as _exc:
+    all_kbs = []
+    st.warning(f"Could not load Knowledge Bases: {_exc}")
+
+kb_options = {kb["name"]: kb["kb_id"] for kb in all_kbs}
+
+if not kb_options:
+    st.warning(
+        "No Knowledge Bases found. "
+        "Create one on the **Knowledge Bases** page before importing documents."
+    )
+    kb_options = {"(create a KB first)": None}
+
+selected_kb_name = st.selectbox(
+    "Knowledge Base *",
+    options=list(kb_options.keys()),
+    help="All documents imported here will be associated with this Knowledge Base.",
+)
+selected_kb_id = kb_options.get(selected_kb_name)
+
+if not selected_kb_id:
+    st.stop()
 
 # ── Source input ──────────────────────────────────────────────────────────────
 tab_file, tab_url, tab_jsonl = st.tabs(["📄 Upload a File", "🔗 From a Web Address", "📦 Bulk JSONL Import"])
@@ -60,7 +91,7 @@ with tab_url:
 with tab_jsonl:
     st.markdown(
         "Import a bulk JSONL file — for example, a dataset previously exported from "
-        "this pipeline or crawled with `crawl_ocp_docs.py`."
+        "this pipeline or crawled with an external tool."
     )
     jsonl_file = st.file_uploader(
         "Choose a .jsonl file",
@@ -103,7 +134,7 @@ with tab_jsonl:
         # ── Field mapper ──────────────────────────────────────────────────────
         _schema_unknown = not preview or preview.get("schema") == "unknown"
         _avail_keys = preview.get("available_keys", []) if preview else []
-        field_map_inputs: dict[str, str] = {}  # populated inside the expander
+        field_map_inputs: dict[str, str] = {}
 
         _PIPELINE_FIELDS = [
             ("content",  "Content *",  "The main text body of each chunk — required."),
@@ -124,18 +155,15 @@ with tab_jsonl:
             else:
                 st.caption(
                     "Map your JSONL keys to the fields this pipeline expects. "
-                    "Leave a field as **(none)** to skip it. "
-                    "The mapping overrides auto-detection for this import."
+                    "Leave a field as **(none)** to skip it."
                 )
-
                 _none_opt = "(none)"
                 _key_opts  = [_none_opt] + _avail_keys
 
-                field_map_inputs: dict[str, str] = {}
+                field_map_inputs = {}
                 cols = st.columns(2)
                 for i, (fld, label, tip) in enumerate(_PIPELINE_FIELDS):
                     with cols[i % 2]:
-                        # Smart default: pre-select if key name matches
                         _default = fld if fld in _avail_keys else _none_opt
                         chosen = st.selectbox(
                             label,
@@ -147,17 +175,12 @@ with tab_jsonl:
                         if chosen != _none_opt:
                             field_map_inputs[fld] = chosen
 
-                # Live preview of first record through the mapping
                 if field_map_inputs and preview and preview.get("sample_records"):
                     st.divider()
                     st.caption("Preview — first record through your mapping:")
                     try:
                         from pipeline.jsonl_importer import peek_jsonl as _peek
-                        _mapped_preview = _peek(
-                            jsonl_file,
-                            n=1,
-                            field_map=field_map_inputs,
-                        )
+                        _mapped_preview = _peek(jsonl_file, n=1, field_map=field_map_inputs)
                         if _mapped_preview["sample_chunks"]:
                             c = _mapped_preview["sample_chunks"][0]
                             st.markdown(f"**Title:** {c.title or '—'}")
@@ -168,8 +191,6 @@ with tab_jsonl:
                         st.warning(f"Preview error: {_prev_exc}")
 
                 st.divider()
-
-                # Save as reusable schema
                 st.caption("Save this mapping as a reusable named schema:")
                 _sc1, _sc2 = st.columns([3, 1])
                 with _sc1:
@@ -194,18 +215,16 @@ with tab_jsonl:
                                     name=_schema_name.strip(),
                                     field_map=field_map_inputs,
                                 )
-                                st.success(f"Schema '{_schema_name.strip()}' saved to schemas.yaml.")
+                                st.success(f"Schema '{_schema_name.strip()}' saved.")
                             except Exception as _se:
                                 st.error(f"Could not save schema: {_se}")
 
-        # Resolve what field_map to use for the actual import
         _active_field_map: dict[str, str] | None = (
             field_map_inputs if field_map_inputs and "content" in field_map_inputs else None
         )
 
         st.divider()
 
-        # ── JSONL-specific controls ───────────────────────────────────────────
         jsonl_tags_raw = st.text_input(
             "Extra tags  *(optional)*",
             placeholder="openshift, internal, 4.18",
@@ -214,40 +233,13 @@ with tab_jsonl:
         )
         jsonl_tags = [t.strip() for t in jsonl_tags_raw.split(",") if t.strip()]
 
-        # Use case tracking — required for crawler-schema files
-        _is_crawler = preview and preview.get("schema") == "crawler"
-        uc_col1, uc_col2 = st.columns(2)
-        with uc_col1:
-            jsonl_usecase_id = st.text_input(
-                "Use case ID" + (" *" if _is_crawler else "  *(optional)*"),
-                placeholder="GENAI1597_SSOP",
-                help="Business use-case identifier for ledger tracking. Required for crawler-schema files.",
-                key="jsonl_usecase_id",
-            )
-        with uc_col2:
-            jsonl_agent_filter = st.text_input(
-                "Agent filter" + (" *" if _is_crawler else "  *(optional)*"),
-                placeholder="ssop_cloud_operations_knowledge_agent",
-                help="Target agent/persona identifier for ledger tracking. Required for crawler-schema files.",
-                key="jsonl_agent_filter",
-            )
-
         if not preview or not preview.get("has_embeddings"):
             st.info(
                 "⚡ This file has no pre-computed embeddings. "
                 "Clicking **Import** will stage the chunks; "
-                "you'll embed and push them from the Review Queue. "
-                "For a 20 000-chunk file this takes a few minutes and uses your OpenAI API.",
+                "you'll embed and push them from the Review Queue.",
                 icon="ℹ️",
             )
-
-        jsonl_kb_name = st.text_input(
-            "Knowledge base name",
-            value="default",
-            placeholder="e.g. openshift-4.18, internal-docs",
-            help="Logical name used for ledger grouping and drift tracking.",
-            key="jsonl_kb_name",
-        )
 
         if st.button("📦  Import JSONL", type="primary", width="stretch", key="jsonl_submit"):
             import io as _io
@@ -270,10 +262,7 @@ with tab_jsonl:
                     batch_name=jsonl_file.name,
                     extra_tags=jsonl_tags,
                     progress_cb=_progress,
-                    kb_name=jsonl_kb_name.strip() or "default",
-                    usecase_id=jsonl_usecase_id.strip() or None,
-                    agent_filter=jsonl_agent_filter.strip() or None,
-                    require_usecase=bool(_is_crawler) and not _active_field_map,
+                    kb_id=selected_kb_id,
                     field_map=_active_field_map,
                 )
                 progress_bar.progress(1.0, text="Done!")
@@ -302,68 +291,39 @@ with tab_jsonl:
         else:
             embed_note = "ℹ️ No embeddings — sections will be embedded when you push from the Review Queue."
         st.info(embed_note)
-        st.info(f"Go to **Review Queue** → **Push to Knowledge Base** to make these sections searchable.\n\nBatch ID: `{r['doc_id']}`")
+        st.info(f"Go to **Review Queue** → push to make these sections searchable.\n\nBatch ID: `{r['doc_id']}`")
 
         if st.button("Clear result", key="clear_jsonl"):
             del st.session_state["last_jsonl_import"]
             st.rerun()
 
 # ── Tags / Advanced / Submit — only for File and URL tabs ────────────────────
-# (JSONL tab has its own self-contained flow above)
 if jsonl_file:
     st.stop()
 
-# ── Tags / KB name ────────────────────────────────────────────────────────────
 st.divider()
-col_tags, col_kb = st.columns([3, 1])
-with col_tags:
-    tags_raw = st.text_input(
-        "Tags  *(optional)*",
-        placeholder="finance, q1-2024, internal",
-        help="Comma-separated keywords that describe this document. These will appear in search results.",
-    )
-with col_kb:
-    kb_name = st.text_input(
-        "Knowledge base",
-        value="default",
-        placeholder="default",
-        help="Logical knowledge base name for grouping and drift tracking.",
-    )
+
+tags_raw = st.text_input(
+    "Tags  *(optional)*",
+    placeholder="finance, q1-2024, internal",
+    help="Comma-separated keywords that describe this document.",
+)
 tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
 if tags:
     st.caption("Will be tagged: " + "  ".join(f"`{t}`" for t in tags))
 
-uc_col1, uc_col2 = st.columns(2)
-with uc_col1:
-    doc_usecase_id = st.text_input(
-        "Use case ID  *(optional)*",
-        placeholder="GENAI1597_SSOP",
-        help="Business use-case identifier. Used to track which knowledge base this document belongs to.",
-        key="doc_usecase_id",
-    )
-with uc_col2:
-    doc_agent_filter = st.text_input(
-        "Agent filter  *(optional)*",
-        placeholder="ssop_cloud_operations_knowledge_agent",
-        help="Target agent or persona this document is intended for.",
-        key="doc_agent_filter",
-    )
-
-# ── Advanced ──────────────────────────────────────────────────────────────────
 with st.expander("⚙️  Advanced options"):
     auto_push = st.toggle(
         "Push directly to knowledge base if all quality checks pass",
         value=False,
         help=(
-            "If on, documents with no quality flags skip the review step and "
-            "become searchable immediately. Documents with flagged chunks (too short, "
-            "too long, boilerplate, or stale) always go to the Review Queue."
+            "If on, documents with no quality flags skip the review step. "
+            "Requires a corpus with this KB to be configured for the target vector store."
         ),
     )
 
 st.divider()
 
-# ── Submit ────────────────────────────────────────────────────────────────────
 source_ready = uploaded_file is not None or bool(url_input.strip())
 
 if st.button(
@@ -392,9 +352,7 @@ if st.button(
                 source=source_arg,
                 extra_tags=tags,
                 auto_push=auto_push,
-                kb_name=kb_name.strip() or "default",
-                usecase_id=doc_usecase_id.strip() or None,
-                agent_filter=doc_agent_filter.strip() or None,
+                kb_id=selected_kb_id,
             )
 
             if result["quality_passed"]:
@@ -431,7 +389,6 @@ if "last_ingest" in st.session_state:
     st.divider()
 
     with st.container(border=True):
-        # Header
         if passed:
             st.success(
                 f"**{result['title']}** was added successfully."
@@ -443,7 +400,6 @@ if "last_ingest" in st.session_state:
                 "Visit the **Review Queue** to inspect it and decide whether to approve it."
             )
 
-        # Metrics row
         chunk_count = result.get("chunk_count", 0)
         age_days    = result.get("age_days")
         is_stale    = result.get("is_stale", False)
@@ -459,23 +415,18 @@ if "last_ingest" in st.session_state:
             age_display = "age unknown"
 
         m1, m2, m3 = st.columns(3)
-        m1.metric("Sections found", chunk_count,
-                  help="Number of logical sections the document was split into")
-        m2.metric("Clean sections", f"{score:.0%}",
-                  help="Fraction of sections with no quality flags")
+        m1.metric("Sections found", chunk_count)
+        m2.metric("Clean sections", f"{score:.0%}")
         m3.metric("Content age", age_display)
 
-        # Tags
         if result.get("tags"):
             st.write("**Tags:** " + "  ".join(f"`{t}`" for t in result["tags"]))
 
-        # Quality flags
         if result.get("flags"):
             with st.expander("📋 Quality notes — why this document needs review"):
                 for flag in result["flags"]:
                     st.write(f"• {flag}")
 
-        # Next-step guidance
         if not passed:
             st.info(
                 f"📋 Go to [Review Queue](review) to inspect, approve, or reject this document.\n\n"
@@ -487,7 +438,6 @@ if "last_ingest" in st.session_state:
                 "**Push to Knowledge Base** to make it searchable."
             )
 
-    # Clear button
     if st.button("Clear result", type="secondary"):
         del st.session_state["last_ingest"]
         st.rerun()

@@ -1,9 +1,10 @@
+"""Corpus CRUD router."""
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 from api.models import (
     CreateCorpusRequest,
     UpdateCorpusRequest,
-    CorpusDocsRequest,
+    CorpusKBRequest,
     MessageResponse,
 )
 import json, sys, os
@@ -23,16 +24,16 @@ def list_corpora():
     return {"corpora": _store().list_all()}
 
 
-@router.post("/")
+@router.post("/", status_code=201)
 def create_corpus(req: CreateCorpusRequest):
     try:
         corpus_id = _store().create(
             name=req.name,
             description=req.description,
-            kb_names=req.kb_names,
             usecase_id=req.usecase_id,
             agent_filter=req.agent_filter,
-            sources=req.sources,
+            kb_ids=req.kb_ids,
+            vector_store_id=req.vector_store_id,
         )
         return {"corpus_id": corpus_id}
     except Exception as e:
@@ -51,78 +52,68 @@ def get_corpus(corpus_id: str):
 
 @router.patch("/{corpus_id}", response_model=MessageResponse)
 def update_corpus(corpus_id: str, req: UpdateCorpusRequest):
-    corpus = _store().get(corpus_id)
-    if not corpus:
+    if not _store().get(corpus_id):
         raise HTTPException(status_code=404, detail="Corpus not found")
     _store().update(
         corpus_id=corpus_id,
         name=req.name,
         description=req.description,
-        kb_names=req.kb_names,
         usecase_id=req.usecase_id,
         agent_filter=req.agent_filter,
-        sources=req.sources,
+        vector_store_id=req.vector_store_id,
     )
     return MessageResponse(message="Corpus updated")
 
 
 @router.delete("/{corpus_id}", response_model=MessageResponse)
 def delete_corpus(corpus_id: str):
-    corpus = _store().get(corpus_id)
-    if not corpus:
+    if not _store().get(corpus_id):
         raise HTTPException(status_code=404, detail="Corpus not found")
     _store().delete(corpus_id)
     return MessageResponse(message="Corpus deleted")
 
 
-@router.post("/{corpus_id}/docs", response_model=MessageResponse)
-def add_docs(corpus_id: str, req: CorpusDocsRequest):
-    corpus = _store().get(corpus_id)
-    if not corpus:
+@router.post("/{corpus_id}/kbs", response_model=MessageResponse)
+def add_kbs(corpus_id: str, req: CorpusKBRequest):
+    if not _store().get(corpus_id):
         raise HTTPException(status_code=404, detail="Corpus not found")
-    _store().add_docs(
-        corpus_id=corpus_id,
-        doc_ids=req.doc_ids,
-        chunk_ids=req.chunk_ids,
-        titles=req.titles or None,
-    )
-    return MessageResponse(message=f"Added {len(req.doc_ids)} document(s) to corpus")
+    _store().add_kbs(corpus_id=corpus_id, kb_ids=req.kb_ids)
+    return MessageResponse(message=f"Added {len(req.kb_ids)} Knowledge Base(s) to corpus")
 
 
-@router.delete("/{corpus_id}/docs", response_model=MessageResponse)
-def remove_docs(corpus_id: str, req: CorpusDocsRequest):
-    corpus = _store().get(corpus_id)
-    if not corpus:
+@router.delete("/{corpus_id}/kbs", response_model=MessageResponse)
+def remove_kbs(corpus_id: str, req: CorpusKBRequest):
+    if not _store().get(corpus_id):
         raise HTTPException(status_code=404, detail="Corpus not found")
-    _store().remove_docs(
-        corpus_id=corpus_id,
-        doc_ids=req.doc_ids,
-        chunk_ids=req.chunk_ids,
-        titles=req.titles or None,
-    )
-    return MessageResponse(message=f"Removed {len(req.doc_ids)} document(s) from corpus")
+    _store().remove_kbs(corpus_id=corpus_id, kb_ids=req.kb_ids)
+    return MessageResponse(message=f"Removed {len(req.kb_ids)} Knowledge Base(s) from corpus")
 
 
 @router.get("/{corpus_id}/changelog")
 def get_changelog(corpus_id: str, limit: int = 100):
-    corpus = _store().get(corpus_id)
-    if not corpus:
+    if not _store().get(corpus_id):
         raise HTTPException(status_code=404, detail="Corpus not found")
     return {"changelog": _store().get_changelog(corpus_id, limit=limit)}
 
 
 @router.get("/{corpus_id}/export")
 def export_corpus(corpus_id: str):
-    from pipeline.mongo_store import get_staging
+    """Export all staged chunks from every KB in this corpus as JSONL."""
+    from pipeline.mongo_store import get_staging, get_kb_store
     corpus = _store().get(corpus_id)
     if not corpus:
         raise HTTPException(status_code=404, detail="Corpus not found")
 
-    staging = get_staging()
+    staging  = get_staging()
+    kb_store = get_kb_store()
     lines: list[str] = []
-    for doc_id in corpus.get("doc_ids", []):
-        for chunk in staging.get_chunks(doc_id):
-            lines.append(json.dumps(chunk))
+    for kb_id in corpus.get("kb_ids", []):
+        kb = kb_store.get(kb_id)
+        if not kb:
+            continue
+        for doc_id in kb.get("doc_ids", []):
+            for chunk in staging.get_chunks(doc_id):
+                lines.append(json.dumps(chunk))
 
     filename = f"corpus_{corpus.get('name', corpus_id)}.jsonl"
     return Response(

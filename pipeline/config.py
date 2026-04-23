@@ -98,6 +98,8 @@ class Settings:
     mongodb_coll_usecase_ledger:     str = os.getenv("MONGODB_COLL_USECASE_LEDGER",     "usecase_ledger")
     mongodb_coll_usecase_confluence: str = os.getenv("MONGODB_COLL_USECASE_CONFLUENCE", "usecase_confluence_sources")
     mongodb_coll_doc_manifests:      str = os.getenv("MONGODB_COLL_DOC_MANIFESTS",      "doc_manifests")
+    mongodb_coll_knowledge_bases:    str = os.getenv("MONGODB_COLL_KNOWLEDGE_BASES",    "knowledge_bases")
+    mongodb_coll_vector_stores:      str = os.getenv("MONGODB_COLL_VECTOR_STORES",      "vector_stores")
 
     def validate(self) -> None:
         """Raise ValueError for obviously missing required settings."""

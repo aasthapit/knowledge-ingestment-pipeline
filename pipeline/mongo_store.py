@@ -1,21 +1,14 @@
 """
 mongo_store.py
-MongoDB-backed staging store and knowledge-base ledger.
+MongoDB-backed stores for the knowledge ingestion pipeline.
 
-Two classes are provided:
-
-``MongoStagingStore``
-    Replaces the Redis ``StagingStore`` for the document review workflow.
-    Stores document metadata and chunks between ingestion and final push to
-    the vector database.  Exposes the same interface as
-    :class:`~pipeline.redis_store.StagingStore` so ``review.py`` and the
-    Streamlit pages need no structural changes.
-
-``KBLedger``
-    Permanent record of every document that has been pushed to the vector
-    store.  Enables drift detection: tracks source modification time / size
-    (for files) or URL (for web sources) so you can identify documents that
-    have changed since they were last indexed.
+Classes:
+  MongoStagingStore     — staging area between ingest and push (KB-scoped)
+  KBLedger              — permanent pushed-doc record with drift detection
+  UsecaseLedger         — per-usecase/agent chunk inventory + Confluence sources
+  CorpusStore           — named corpora (collections of KBs with usecase context)
+  KnowledgeBaseStore    — named knowledge bases (Confluence or JSONL sources)
+  VectorStoreConfigStore— registered vector DB targets (Redis or custom)
 """
 from __future__ import annotations
 
@@ -128,9 +121,7 @@ class MongoStagingStore:
         """Create indexes the first time the store is used."""
         self._docs.create_index("status")
         self._docs.create_index("ingested_at")
-        self._docs.create_index("usecase_id")
-        self._docs.create_index("agent_filter")
-        self._docs.create_index([("usecase_id", ASCENDING), ("agent_filter", ASCENDING)])
+        self._docs.create_index("kb_id")
         self._chunks.create_index("doc_id")
         self._chunks.create_index("chunk_id", unique=True, sparse=True)
 
@@ -204,9 +195,7 @@ class MongoStagingStore:
             "unique_sources":        _int(meta.get("unique_sources", 0)),
             "has_embeddings":        _bool(meta.get("has_embeddings", False)),
             "has_partial_embeddings": _bool(meta.get("has_partial_embeddings", False)),
-            "kb_name":               meta.get("kb_name", "default"),
-            "usecase_id":            meta.get("usecase_id") or None,
-            "agent_filter":          meta.get("agent_filter") or None,
+            "kb_id":                 meta.get("kb_id") or None,
             "ingested_at":           now,
             "approved_at":           None,
             "pushed_at":             None,
@@ -295,9 +284,7 @@ class MongoStagingStore:
             "unique_sources":         0,
             "has_embeddings":         False,
             "has_partial_embeddings": False,
-            "kb_name":                new_meta.get("kb_name", "default"),
-            "usecase_id":             new_meta.get("usecase_id") or None,
-            "agent_filter":           new_meta.get("agent_filter") or None,
+            "kb_id":                  new_meta.get("kb_id") or None,
             "ingested_at":            now,
             "approved_at":            None,
             "pushed_at":              None,
@@ -397,18 +384,16 @@ class MongoStagingStore:
         """Return doc_ids with status approved."""
         return [d["_id"] for d in self._docs.find({"status": "approved"}, {"_id": 1})]
 
-    def list_all(self) -> list[dict[str, Any]]:
+    def list_all(self, kb_id: str | None = None) -> list[dict[str, Any]]:
         """
-        Return a summary list of every staged document (newest first).
-
-        Each dict has: doc_id, title, source_path, source_type, status,
-        quality_score, quality_flags, chunk_count.
+        Return a summary list of staged documents (newest first).
+        Optionally filter by kb_id.
         """
+        query: dict[str, Any] = {}
+        if kb_id:
+            query["kb_id"] = kb_id
         results = []
-        for doc in self._docs.find(
-            {},
-            sort=[("ingested_at", DESCENDING)],
-        ):
+        for doc in self._docs.find(query, sort=[("ingested_at", DESCENDING)]):
             doc["doc_id"] = doc.pop("_id")
             for key in ("ingested_at", "approved_at", "pushed_at"):
                 val = doc.get(key)
@@ -417,29 +402,14 @@ class MongoStagingStore:
             results.append(doc)
         return results
 
-
-    def get_chunks_by_usecase(
-        self,
-        usecase_id: str,
-        agent_filter: str,
-        status: str | None = "pushed",
-    ) -> list[dict]:
-        """
-        Return all chunk dicts for docs matching (usecase_id, agent_filter).
-
-        Optionally filter by doc status (default: pushed docs only).
-        Used for JSONL export to external embedding pipelines.
-        """
-        query: dict[str, Any] = {
-            "usecase_id":   usecase_id,
-            "agent_filter": agent_filter,
-        }
+    def get_chunks_by_kb(self, kb_id: str, status: str | None = "pushed") -> list[dict]:
+        """Return all chunk dicts for docs belonging to a KB, optionally filtered by status."""
+        query: dict[str, Any] = {"kb_id": kb_id}
         if status:
             query["status"] = status
         doc_ids = [d["_id"] for d in self._docs.find(query, {"_id": 1})]
         if not doc_ids:
             return []
-
         chunks = []
         for cd in self._chunks.find({"doc_id": {"$in": doc_ids}}):
             cd["chunk_id"] = str(cd.pop("_id"))
@@ -478,6 +448,7 @@ class KBLedger:
         self._ensure_indexes()
 
     def _ensure_indexes(self) -> None:
+        self._coll.create_index("kb_id")
         self._coll.create_index("kb_name")
         self._coll.create_index("source_path")
         self._coll.create_index("drift_status")
@@ -497,6 +468,7 @@ class KBLedger:
         chunk_ids: list[str],
         tags: list[str],
         quality_score: float,
+        kb_id: str | None = None,
         kb_name: str = "default",
         usecase_id: str | None = None,
         agent_filter: str | None = None,
@@ -505,7 +477,8 @@ class KBLedger:
         Record (or update) a document in the ledger after a successful push.
 
         Captures source file mtime/size if the source is a local file path
-        that currently exists on disk.
+        that currently exists on disk.  kb_id links back to the KnowledgeBase
+        entity; usecase_id/agent_filter come from the parent corpus at push time.
         """
         now = datetime.now(timezone.utc)
         source_mtime: float | None = None
@@ -529,6 +502,7 @@ class KBLedger:
             "chunk_count":     len(chunk_ids),
             "tags":            tags,
             "quality_score":   quality_score,
+            "kb_id":           kb_id or None,
             "kb_name":         kb_name,
             "usecase_id":      usecase_id or None,
             "agent_filter":    agent_filter or None,
@@ -540,7 +514,7 @@ class KBLedger:
         }
 
         self._coll.replace_one({"_id": doc_id}, record, upsert=True)
-        logger.debug("Ledger: recorded push for doc %s (kb=%s)", doc_id, kb_name)
+        logger.debug("Ledger: recorded push for doc %s (kb_id=%s)", doc_id, kb_id)
 
     # ------------------------------------------------------------------
     # Drift detection
@@ -1166,14 +1140,12 @@ def get_usecase_ledger() -> UsecaseLedger:
 
 class CorpusStore:
     """
-    Manages named corpora — first-class entities that group documents for a
-    specific use case.  A corpus owns references to its documents/chunks and
-    records an add/remove changelog.  Multiple corpora may share the same
-    document (many-to-many).
+    Manages named corpora — collections of Knowledge Bases with a shared
+    usecase/agent context and a target vector store.
 
     Collections used:
     - ``corpora``           — one doc per corpus
-    - ``corpus_changelog``  — immutable audit trail of add/remove events
+    - ``corpus_changelog``  — immutable audit trail of KB add/remove events
     """
 
     def __init__(self, db: Database | None = None) -> None:
@@ -1186,6 +1158,7 @@ class CorpusStore:
         self._coll.create_index("name", unique=True)
         self._coll.create_index("usecase_id")
         self._coll.create_index("agent_filter")
+        self._coll.create_index("kb_ids")
         self._changelog.create_index("corpus_id")
         self._changelog.create_index("timestamp")
 
@@ -1197,28 +1170,24 @@ class CorpusStore:
         self,
         name: str,
         description: str = "",
-        kb_names: list[str] | None = None,
         usecase_id: str = "",
         agent_filter: str = "",
-        sources: list[dict] | None = None,
+        kb_ids: list[str] | None = None,
+        vector_store_id: str = "default",
     ) -> str:
         """Create a new corpus and return its corpus_id."""
         now = datetime.now(timezone.utc)
         corpus_id = str(uuid.uuid4())
         self._coll.insert_one({
-            "_id": corpus_id,
-            "name": name,
-            "description": description,
-            "kb_names": kb_names or ["default"],
-            "usecase_id": usecase_id,
-            "agent_filter": agent_filter,
-            "sources": sources or [],
-            "doc_ids": [],
-            "chunk_ids": [],
-            "doc_count": 0,
-            "chunk_count": 0,
-            "created_at": now,
-            "last_updated": now,
+            "_id":             corpus_id,
+            "name":            name,
+            "description":     description,
+            "usecase_id":      usecase_id,
+            "agent_filter":    agent_filter,
+            "kb_ids":          kb_ids or [],
+            "vector_store_id": vector_store_id,
+            "created_at":      now,
+            "last_updated":    now,
         })
         return corpus_id
 
@@ -1227,96 +1196,63 @@ class CorpusStore:
         corpus_id: str,
         name: str | None = None,
         description: str | None = None,
-        kb_names: list[str] | None = None,
         usecase_id: str | None = None,
         agent_filter: str | None = None,
-        sources: list[dict] | None = None,
+        kb_ids: list[str] | None = None,
+        vector_store_id: str | None = None,
     ) -> None:
         fields: dict[str, Any] = {"last_updated": datetime.now(timezone.utc)}
         if name is not None:
             fields["name"] = name
         if description is not None:
             fields["description"] = description
-        if kb_names is not None:
-            fields["kb_names"] = kb_names
         if usecase_id is not None:
             fields["usecase_id"] = usecase_id
         if agent_filter is not None:
             fields["agent_filter"] = agent_filter
-        if sources is not None:
-            fields["sources"] = sources
+        if kb_ids is not None:
+            fields["kb_ids"] = kb_ids
+        if vector_store_id is not None:
+            fields["vector_store_id"] = vector_store_id
         self._coll.update_one({"_id": corpus_id}, {"$set": fields})
 
     # ------------------------------------------------------------------
-    # Document membership
+    # KB membership
     # ------------------------------------------------------------------
 
-    def add_docs(
-        self,
-        corpus_id: str,
-        doc_ids: list[str],
-        chunk_ids: list[str],
-        titles: list[str] | None = None,
-    ) -> None:
+    def add_kbs(self, corpus_id: str, kb_ids: list[str]) -> None:
         now = datetime.now(timezone.utc)
         self._coll.update_one(
             {"_id": corpus_id},
             {
-                "$addToSet": {
-                    "doc_ids": {"$each": doc_ids},
-                    "chunk_ids": {"$each": chunk_ids},
-                },
+                "$addToSet": {"kb_ids": {"$each": kb_ids}},
                 "$set": {"last_updated": now},
             },
         )
-        self._recalc_counts(corpus_id)
-        for i, doc_id in enumerate(doc_ids):
+        for kb_id in kb_ids:
             self._changelog.insert_one({
                 "corpus_id": corpus_id,
-                "action": "added",
-                "doc_id": doc_id,
-                "title": (titles[i] if titles and i < len(titles) else ""),
+                "action":    "kb_added",
+                "kb_id":     kb_id,
                 "timestamp": now,
             })
 
-    def remove_docs(
-        self,
-        corpus_id: str,
-        doc_ids: list[str],
-        chunk_ids: list[str],
-        titles: list[str] | None = None,
-    ) -> None:
+    def remove_kbs(self, corpus_id: str, kb_ids: list[str]) -> None:
         now = datetime.now(timezone.utc)
         self._coll.update_one(
             {"_id": corpus_id},
             {
-                "$pullAll": {
-                    "doc_ids": doc_ids,
-                    "chunk_ids": chunk_ids,
-                },
-                "$set": {"last_updated": now},
+                "$pullAll": {"kb_ids": kb_ids},
+                "$set":     {"last_updated": now},
             },
         )
-        self._recalc_counts(corpus_id)
-        for i, doc_id in enumerate(doc_ids):
+        for kb_id in kb_ids:
             self._changelog.insert_one({
                 "corpus_id": corpus_id,
-                "action": "removed",
-                "doc_id": doc_id,
-                "title": (titles[i] if titles and i < len(titles) else ""),
+                "action":    "kb_removed",
+                "kb_id":     kb_id,
                 "timestamp": now,
             })
-
-    def _recalc_counts(self, corpus_id: str) -> None:
-        doc = self._coll.find_one({"_id": corpus_id}, {"doc_ids": 1, "chunk_ids": 1})
-        if doc:
-            self._coll.update_one(
-                {"_id": corpus_id},
-                {"$set": {
-                    "doc_count": len(doc.get("doc_ids") or []),
-                    "chunk_count": len(doc.get("chunk_ids") or []),
-                }},
-            )
 
     # ------------------------------------------------------------------
     # Read operations
@@ -1332,7 +1268,14 @@ class CorpusStore:
 
     def list_all(self) -> list[dict[str, Any]]:
         results = []
-        for doc in self._coll.find({}, {"chunk_ids": 0}, sort=[("last_updated", DESCENDING)]):
+        for doc in self._coll.find({}, sort=[("last_updated", DESCENDING)]):
+            results.append(self._serialize(doc))
+        return results
+
+    def get_corpora_for_kb(self, kb_id: str) -> list[dict[str, Any]]:
+        """Return all corpora that include a given KB."""
+        results = []
+        for doc in self._coll.find({"kb_ids": kb_id}):
             results.append(self._serialize(doc))
         return results
 
@@ -1372,3 +1315,280 @@ def get_corpus_store() -> CorpusStore:
     if _corpus_store is None:
         _corpus_store = CorpusStore()
     return _corpus_store
+
+
+# ---------------------------------------------------------------------------
+# KnowledgeBaseStore — named source entities (Confluence URLs or JSONL files)
+# ---------------------------------------------------------------------------
+
+class KnowledgeBaseStore:
+    """
+    Manages Knowledge Base entities — the atomic source units that hold either
+    a set of Confluence URLs to crawl or a JSONL file to import.
+
+    KBs carry no usecase/agent context; that is added at the corpus level.
+
+    Collection: ``knowledge_bases``
+    """
+
+    def __init__(self, db: Database | None = None) -> None:
+        self._db: Database = db or _get_db()
+        self._coll: Collection = self._db[_coll_name(settings.mongodb_coll_knowledge_bases)]
+        self._ensure_indexes()
+
+    def _ensure_indexes(self) -> None:
+        self._coll.create_index("name", unique=True)
+        self._coll.create_index("source_type")
+        self._coll.create_index("status")
+
+    def create(
+        self,
+        name: str,
+        source_type: str,
+        description: str = "",
+        confluence_urls: list[str] | None = None,
+        max_depth: int = -1,
+        refresh_cron: str | None = None,
+        file_name: str | None = None,
+        file_ref: str | None = None,
+    ) -> str:
+        """Create a new KB and return its kb_id."""
+        if source_type not in ("confluence", "jsonl"):
+            raise ValueError(f"source_type must be 'confluence' or 'jsonl', got {source_type!r}")
+        now = datetime.now(timezone.utc)
+        kb_id = str(uuid.uuid4())
+        self._coll.insert_one({
+            "_id":             kb_id,
+            "name":            name,
+            "description":     description,
+            "source_type":     source_type,
+            "confluence_urls": confluence_urls or [],
+            "max_depth":       max_depth,
+            "refresh_cron":    refresh_cron,
+            "file_name":       file_name or "",
+            "file_ref":        file_ref or "",
+            "doc_ids":         [],
+            "status":          "empty",
+            "created_at":      now,
+            "last_updated":    now,
+            "last_ingested_at": None,
+        })
+        return kb_id
+
+    def update(
+        self,
+        kb_id: str,
+        name: str | None = None,
+        description: str | None = None,
+        confluence_urls: list[str] | None = None,
+        max_depth: int | None = None,
+        refresh_cron: str | None = None,
+        file_name: str | None = None,
+        file_ref: str | None = None,
+    ) -> None:
+        fields: dict[str, Any] = {"last_updated": datetime.now(timezone.utc)}
+        if name is not None:
+            fields["name"] = name
+        if description is not None:
+            fields["description"] = description
+        if confluence_urls is not None:
+            fields["confluence_urls"] = confluence_urls
+        if max_depth is not None:
+            fields["max_depth"] = max_depth
+        if refresh_cron is not None:
+            fields["refresh_cron"] = refresh_cron
+        if file_name is not None:
+            fields["file_name"] = file_name
+        if file_ref is not None:
+            fields["file_ref"] = file_ref
+        self._coll.update_one({"_id": kb_id}, {"$set": fields})
+
+    def add_doc_ids(self, kb_id: str, doc_ids: list[str]) -> None:
+        """Track doc_ids that have been staged/pushed from this KB."""
+        self._coll.update_one(
+            {"_id": kb_id},
+            {
+                "$addToSet": {"doc_ids": {"$each": doc_ids}},
+                "$set":      {"last_updated": datetime.now(timezone.utc)},
+            },
+        )
+
+    def set_status(self, kb_id: str, status: str) -> None:
+        """Update the KB status: 'empty' | 'staging' | 'ready'."""
+        now = datetime.now(timezone.utc)
+        update: dict[str, Any] = {"status": status, "last_updated": now}
+        if status == "ready":
+            update["last_ingested_at"] = now
+        self._coll.update_one({"_id": kb_id}, {"$set": update})
+
+    def get(self, kb_id: str) -> dict[str, Any] | None:
+        doc = self._coll.find_one({"_id": kb_id})
+        return self._serialize(doc) if doc else None
+
+    def get_by_name(self, name: str) -> dict[str, Any] | None:
+        doc = self._coll.find_one({"name": name})
+        return self._serialize(doc) if doc else None
+
+    def list_all(self, source_type: str | None = None) -> list[dict[str, Any]]:
+        query: dict[str, Any] = {}
+        if source_type:
+            query["source_type"] = source_type
+        results = []
+        for doc in self._coll.find(query, sort=[("last_updated", DESCENDING)]):
+            results.append(self._serialize(doc))
+        return results
+
+    def delete(self, kb_id: str) -> None:
+        self._coll.delete_one({"_id": kb_id})
+
+    @staticmethod
+    def _serialize(doc: dict[str, Any]) -> dict[str, Any]:
+        doc["kb_id"] = doc.pop("_id", None)
+        for key in ("created_at", "last_updated", "last_ingested_at"):
+            val = doc.get(key)
+            if isinstance(val, datetime):
+                doc[key] = val.isoformat()
+        return doc
+
+
+_kb_store: KnowledgeBaseStore | None = None
+
+
+def get_kb_store() -> KnowledgeBaseStore:
+    """Return (or create) the shared KnowledgeBaseStore instance."""
+    global _kb_store
+    if _kb_store is None:
+        _kb_store = KnowledgeBaseStore()
+    return _kb_store
+
+
+# ---------------------------------------------------------------------------
+# VectorStoreConfigStore — registered vector DB targets
+# ---------------------------------------------------------------------------
+
+class VectorStoreConfigStore:
+    """
+    Stores vector DB connection configs that corpora can target at push time.
+
+    ``type: "redis"`` — uses the existing pipeline Redis config (no extra fields).
+    ``type: "custom"`` — user-supplied endpoint, api_key, collection, extras.
+
+    A built-in record with ``_id = "default"`` always represents the pipeline's
+    configured Redis instance and cannot be deleted.
+
+    Collection: ``vector_stores``
+    """
+
+    _DEFAULT_ID = "default"
+
+    def __init__(self, db: Database | None = None) -> None:
+        self._db: Database = db or _get_db()
+        self._coll: Collection = self._db[_coll_name(settings.mongodb_coll_vector_stores)]
+        self._ensure_indexes()
+        self._ensure_default()
+
+    def _ensure_indexes(self) -> None:
+        self._coll.create_index("name", unique=True)
+        self._coll.create_index("type")
+
+    def _ensure_default(self) -> None:
+        """Upsert the built-in Redis entry so it always exists."""
+        now = datetime.now(timezone.utc)
+        self._coll.update_one(
+            {"_id": self._DEFAULT_ID},
+            {"$setOnInsert": {
+                "_id":        self._DEFAULT_ID,
+                "name":       "Default (Redis)",
+                "type":       "redis",
+                "endpoint":   "",
+                "api_key":    "",
+                "collection": settings.redis_index_name,
+                "extra":      {},
+                "created_at": now,
+            }},
+            upsert=True,
+        )
+
+    def create(
+        self,
+        name: str,
+        vs_type: str,
+        endpoint: str = "",
+        api_key: str = "",
+        collection: str = "",
+        extra: dict | None = None,
+    ) -> str:
+        if vs_type not in ("redis", "custom"):
+            raise ValueError(f"vs_type must be 'redis' or 'custom', got {vs_type!r}")
+        now = datetime.now(timezone.utc)
+        vs_id = str(uuid.uuid4())
+        self._coll.insert_one({
+            "_id":        vs_id,
+            "name":       name,
+            "type":       vs_type,
+            "endpoint":   endpoint,
+            "api_key":    api_key,
+            "collection": collection,
+            "extra":      extra or {},
+            "created_at": now,
+        })
+        return vs_id
+
+    def update(
+        self,
+        vs_id: str,
+        name: str | None = None,
+        endpoint: str | None = None,
+        api_key: str | None = None,
+        collection: str | None = None,
+        extra: dict | None = None,
+    ) -> None:
+        if vs_id == self._DEFAULT_ID:
+            raise ValueError("The default Redis config cannot be modified.")
+        fields: dict[str, Any] = {}
+        if name is not None:
+            fields["name"] = name
+        if endpoint is not None:
+            fields["endpoint"] = endpoint
+        if api_key is not None:
+            fields["api_key"] = api_key
+        if collection is not None:
+            fields["collection"] = collection
+        if extra is not None:
+            fields["extra"] = extra
+        if fields:
+            self._coll.update_one({"_id": vs_id}, {"$set": fields})
+
+    def get(self, vs_id: str) -> dict[str, Any] | None:
+        doc = self._coll.find_one({"_id": vs_id})
+        return self._serialize(doc) if doc else None
+
+    def list_all(self) -> list[dict[str, Any]]:
+        results = []
+        for doc in self._coll.find({}, sort=[("created_at", ASCENDING)]):
+            results.append(self._serialize(doc))
+        return results
+
+    def delete(self, vs_id: str) -> None:
+        if vs_id == self._DEFAULT_ID:
+            raise ValueError("The default Redis config cannot be deleted.")
+        self._coll.delete_one({"_id": vs_id})
+
+    @staticmethod
+    def _serialize(doc: dict[str, Any]) -> dict[str, Any]:
+        doc["vs_id"] = doc.pop("_id", None)
+        created_at = doc.get("created_at")
+        if isinstance(created_at, datetime):
+            doc["created_at"] = created_at.isoformat()
+        return doc
+
+
+_vs_config_store: VectorStoreConfigStore | None = None
+
+
+def get_vs_config_store() -> VectorStoreConfigStore:
+    """Return (or create) the shared VectorStoreConfigStore instance."""
+    global _vs_config_store
+    if _vs_config_store is None:
+        _vs_config_store = VectorStoreConfigStore()
+    return _vs_config_store

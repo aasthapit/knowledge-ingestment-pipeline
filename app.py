@@ -25,17 +25,20 @@ pg = st.navigation(
         "": [
             st.Page("pages/home.py",    title="Dashboard",    icon="🏠", default=True),
         ],
-        "Documents": [
-            st.Page("pages/ingest.py",      title="Add Document", icon="➕"),
-            st.Page("pages/confluence.py",  title="Confluence",   icon="🔗"),
-            st.Page("pages/review.py",      title="Review Queue", icon="📋"),
+        "Sources": [
+            st.Page("pages/kb.py",           title="Knowledge Bases",  icon="📂"),
+            st.Page("pages/ingest.py",       title="Add Document",     icon="➕"),
+            st.Page("pages/confluence.py",   title="Confluence",       icon="🔗"),
+        ],
+        "Review": [
+            st.Page("pages/review.py",       title="Review Queue",     icon="📋"),
         ],
         "Knowledge Base": [
             st.Page("pages/corpus.py",           title="Corpus",           icon="📦"),
-            st.Page("pages/search.py",          title="Search",           icon="🔎"),
+            st.Page("pages/vector_stores.py",    title="Vector Stores",    icon="🗄️"),
+            st.Page("pages/search.py",           title="Search",           icon="🔎"),
             st.Page("pages/drift.py",            title="KB Health",        icon="🔍"),
             st.Page("pages/ledger.py",           title="Ledger",           icon="📒"),
-            st.Page("pages/usecase_ledger.py",   title="Use Case Ledger",  icon="🗂️"),
             st.Page("pages/manifests.py",        title="Manifests",        icon="📑"),
             st.Page("pages/status.py",           title="Status",           icon="⚙️"),
         ],

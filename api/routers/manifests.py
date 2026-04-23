@@ -1,3 +1,4 @@
+"""Manifests router — corpus-scoped document snapshots."""
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from api.models import (
@@ -17,16 +18,8 @@ def _mgr():
 
 
 @router.get("/")
-def list_manifests(
-    usecase_id: str | None = None,
-    agent_filter: str | None = None,
-    status: str | None = None,
-):
-    manifests = _mgr().list_manifests(
-        usecase_id=usecase_id,
-        agent_filter=agent_filter,
-        status=status,
-    )
+def list_manifests(corpus_id: str | None = None, status: str | None = None):
+    manifests = _mgr().list_manifests(corpus_id=corpus_id, status=status)
     return {"manifests": manifests}
 
 
@@ -34,9 +27,7 @@ def list_manifests(
 def create_manifest(req: CreateManifestRequest):
     manifest_id = _mgr().create_manifest(
         name=req.name,
-        usecase_id=req.usecase_id,
-        agent_filter=req.agent_filter,
-        kb_name=req.kb_name,
+        corpus_id=req.corpus_id,
         description=req.description,
         tags=req.tags,
     )
@@ -69,11 +60,13 @@ def archive_manifest(manifest_id: str):
 
 @router.post("/snapshot")
 def snapshot_corpus(req: SnapshotManifestRequest):
-    manifest_id = _mgr().snapshot_corpus_to_manifest(
-        usecase_id=req.usecase_id,
-        agent_filter=req.agent_filter,
-        manifest_name=req.manifest_name,
-    )
+    try:
+        manifest_id = _mgr().snapshot_corpus_to_manifest(
+            corpus_id=req.corpus_id,
+            manifest_name=req.manifest_name,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     return {"manifest_id": manifest_id}
 
 
@@ -83,9 +76,8 @@ def create_from_sources(req: CreateFromSourcesRequest):
         name=req.name,
         source_refs=req.source_refs,
         source_type=req.source_type,
-        usecase_id=req.usecase_id,
-        agent_filter=req.agent_filter,
-        kb_name=req.kb_name,
+        corpus_id=req.corpus_id,
+        kb_id=req.kb_id,
         description=req.description,
         tags=req.tags,
     )
@@ -94,24 +86,18 @@ def create_from_sources(req: CreateFromSourcesRequest):
 
 @router.post("/diff")
 def diff_manifests(req: DiffManifestsRequest):
-    result = _mgr().diff_manifests(req.manifest_id_a, req.manifest_id_b)
-    return result
+    return _mgr().diff_manifests(req.manifest_id_a, req.manifest_id_b)
 
 
 @router.post("/{manifest_id}/ingest")
-def ingest_from_manifest(manifest_id: str, extra_tags: list[str] = []):
+def ingest_from_manifest(manifest_id: str, kb_id: str | None = None, extra_tags: list[str] = []):
     def event_stream():
         try:
-            steps = []
-
-            def on_step(msg: str):
-                steps.append(msg)
-
             yield f"data: {json.dumps({'type': 'progress', 'message': 'Starting re-ingest...'})}\n\n"
             result = _mgr().ingest_from_manifest(
                 manifest_id=manifest_id,
+                kb_id=kb_id,
                 extra_tags=extra_tags,
-                auto_push=True,
             )
             yield f"data: {json.dumps({'type': 'done', 'result': result})}\n\n"
         except Exception as e:
@@ -122,5 +108,4 @@ def ingest_from_manifest(manifest_id: str, extra_tags: list[str] = []):
 
 @router.delete("/{manifest_id}/docs")
 def remove_manifest_docs(manifest_id: str, req: RemoveManifestDocsRequest):
-    result = _mgr().remove_manifest_docs(manifest_id, doc_ids=req.doc_ids)
-    return result
+    return _mgr().remove_manifest_docs(manifest_id, doc_ids=req.doc_ids)

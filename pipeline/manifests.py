@@ -51,9 +51,7 @@ class ManifestManager:
         self._ensure_indexes()
 
     def _ensure_indexes(self) -> None:
-        self._coll.create_index("usecase_id")
-        self._coll.create_index("agent_filter")
-        self._coll.create_index([("usecase_id", ASCENDING), ("agent_filter", ASCENDING)])
+        self._coll.create_index("corpus_id")
         self._coll.create_index("status")
         self._coll.create_index("created_at")
         self._coll.create_index("entries.doc_id")
@@ -66,9 +64,7 @@ class ManifestManager:
     def create_manifest(
         self,
         name: str,
-        usecase_id: str | None = None,
-        agent_filter: str | None = None,
-        kb_name: str = "default",
+        corpus_id: str | None = None,
         description: str = "",
         created_by: str = "system",
         tags: list[str] | None = None,
@@ -81,9 +77,7 @@ class ManifestManager:
             "_id":          manifest_id,
             "name":         name,
             "description":  description,
-            "usecase_id":   usecase_id or None,
-            "agent_filter": agent_filter or None,
-            "kb_name":      kb_name,
+            "corpus_id":    corpus_id or None,
             "status":       status,
             "created_at":   now,
             "updated_at":   now,
@@ -136,6 +130,7 @@ class ManifestManager:
         source_type: str,
         source_ref: str,
         title: str,
+        kb_id: str | None = None,
         status: str = "pending",
         staged_at: datetime | None = None,
         pushed_at: datetime | None = None,
@@ -164,6 +159,7 @@ class ManifestManager:
             "source_type": source_type,
             "source_ref":  source_ref,
             "title":       title,
+            "kb_id":       kb_id or None,
             "staged_at":   staged_at or now,
             "pushed_at":   pushed_at,
             "removed_at":  None,
@@ -243,41 +239,47 @@ class ManifestManager:
 
     def snapshot_corpus_to_manifest(
         self,
-        usecase_id: str,
-        agent_filter: str,
+        corpus_id: str,
         manifest_name: str,
-        kb_name: str = "default",
         created_by: str = "system",
         description: str = "",
         tags: list[str] | None = None,
     ) -> str:
         """
-        Save current kb_documents state as a named frozen manifest.
+        Save the current pushed state of all KBs in a corpus as a frozen manifest.
 
+        Entries represent all JSONL docs in the corpus at the time of snapshot.
         Returns the new manifest_id.
         """
-        from pipeline.mongo_store import get_ledger
+        from pipeline.mongo_store import get_ledger, get_corpus_store
 
+        corpus = get_corpus_store().get(corpus_id)
+        if not corpus:
+            raise ValueError(f"Corpus {corpus_id!r} not found.")
+
+        kb_ids = corpus.get("kb_ids") or []
         manifest_id = self.create_manifest(
             name=manifest_name,
-            usecase_id=usecase_id,
-            agent_filter=agent_filter,
-            kb_name=kb_name,
-            description=description or f"Snapshot of {usecase_id}/{agent_filter}",
+            corpus_id=corpus_id,
+            description=description or f"Snapshot of corpus '{corpus.get('name', corpus_id)}'",
             created_by=created_by,
             tags=tags or [],
             status="open",
         )
 
-        kb_docs = get_ledger().list_docs_by_usecase(usecase_id, agent_filter, limit=5000)
+        ledger = get_ledger()
         now = datetime.now(timezone.utc)
         entries: list[dict[str, Any]] = []
 
-        for doc in kb_docs:
-            doc_id = doc.get("doc_id", "")
+        # Collect all pushed docs that belong to any KB in this corpus
+        query: dict[str, Any] = {"kb_id": {"$in": kb_ids}} if kb_ids else {}
+        for doc in ledger._coll.find(query):
+            doc_id       = str(doc.get("_id", ""))
             pushed_at_raw = doc.get("pushed_at")
             pushed_dt: datetime | None = None
-            if isinstance(pushed_at_raw, str):
+            if isinstance(pushed_at_raw, datetime):
+                pushed_dt = pushed_at_raw
+            elif isinstance(pushed_at_raw, str):
                 try:
                     pushed_dt = datetime.fromisoformat(pushed_at_raw)
                 except Exception:
@@ -297,6 +299,7 @@ class ManifestManager:
                 "source_type": doc.get("source_type", ""),
                 "source_ref":  source_ref,
                 "title":       doc.get("title", ""),
+                "kb_id":       doc.get("kb_id") or None,
                 "staged_at":   pushed_dt or now,
                 "pushed_at":   pushed_dt or now,
                 "removed_at":  None,
@@ -315,7 +318,9 @@ class ManifestManager:
             },
         )
         self.freeze_manifest(manifest_id)
-        logger.info("Snapshot manifest %s: %d docs from %s/%s", manifest_id, len(entries), usecase_id, agent_filter)
+        logger.info(
+            "Snapshot manifest %s: %d docs from corpus %s", manifest_id, len(entries), corpus_id
+        )
         return manifest_id
 
     def create_manifest_from_sources(
@@ -323,9 +328,8 @@ class ManifestManager:
         name: str,
         source_refs: list[str],
         source_type: str,
-        usecase_id: str | None = None,
-        agent_filter: str | None = None,
-        kb_name: str = "default",
+        corpus_id: str | None = None,
+        kb_id: str | None = None,
         created_by: str = "system",
         tags: list[str] | None = None,
         description: str = "",
@@ -333,9 +337,7 @@ class ManifestManager:
         """Create an open manifest pre-populated with pending source refs."""
         manifest_id = self.create_manifest(
             name=name,
-            usecase_id=usecase_id,
-            agent_filter=agent_filter,
-            kb_name=kb_name,
+            corpus_id=corpus_id,
             description=description,
             created_by=created_by,
             tags=tags or [],
@@ -351,6 +353,7 @@ class ManifestManager:
                 "source_type": source_type,
                 "source_ref":  ref,
                 "title":       ref,
+                "kb_id":       kb_id or None,
                 "staged_at":   None,
                 "pushed_at":   None,
                 "removed_at":  None,
@@ -376,14 +379,12 @@ class ManifestManager:
     def ingest_from_manifest(
         self,
         manifest_id: str,
-        kb_name: str = "default",
-        usecase_id: str | None = None,
-        agent_filter: str | None = None,
+        kb_id: str | None = None,
         extra_tags: list[str] | None = None,
         progress_cb: Callable[[int, int], None] | None = None,
     ) -> dict[str, Any]:
         """
-        Re-import all Confluence sources in a manifest.
+        Re-import all Confluence sources in a manifest into a Knowledge Base.
 
         File-upload and JSONL entries without a crawlable source_ref are counted
         as skipped — they require manual re-upload.
@@ -401,9 +402,11 @@ class ManifestManager:
         if not manifest:
             return {"ingested": 0, "skipped": 0, "errors": [f"Manifest {manifest_id!r} not found."]}
 
-        resolved_usecase = usecase_id  or manifest.get("usecase_id")
-        resolved_agent   = agent_filter or manifest.get("agent_filter")
-        resolved_kb      = kb_name or manifest.get("kb_name", "default")
+        # Use explicit kb_id; fall back to the first entry's kb_id
+        resolved_kb_id = kb_id or next(
+            (e.get("kb_id") for e in (manifest.get("entries") or []) if e.get("kb_id")),
+            None,
+        )
 
         entries = manifest.get("entries") or []
         confluence_entries = [e for e in entries if e.get("source_type") == "confluence"]
@@ -414,7 +417,6 @@ class ManifestManager:
         if not confluence_entries:
             return {"ingested": 0, "skipped": skipped, "errors": errors}
 
-        # Validate Confluence credentials
         if not settings.confluence_base_url or not settings.confluence_api_token:
             return {
                 "ingested": 0,
@@ -451,8 +453,6 @@ class ManifestManager:
                         "section_breadcrumbs": p.ancestors,
                         "section_heading":     "",
                         "chunk_id":            "",
-                        "usecase_id":          resolved_usecase or "",
-                        "agent_filter":        resolved_agent or "",
                     })
                     for p in pages
                 ]
@@ -461,9 +461,7 @@ class ManifestManager:
                     source=buf,
                     batch_name=source_ref[:80],
                     extra_tags=extra_tags,
-                    kb_name=resolved_kb,
-                    usecase_id=resolved_usecase,
-                    agent_filter=resolved_agent,
+                    kb_id=resolved_kb_id,
                     manifest_id=manifest_id,
                 )
                 ingested += 1
@@ -613,17 +611,14 @@ class ManifestManager:
 
     def list_manifests(
         self,
-        usecase_id: str | None = None,
-        agent_filter: str | None = None,
+        corpus_id: str | None = None,
         status: str | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         """Return manifest summaries (entries array excluded), newest first."""
         query: dict[str, Any] = {}
-        if usecase_id:
-            query["usecase_id"] = usecase_id
-        if agent_filter:
-            query["agent_filter"] = agent_filter
+        if corpus_id:
+            query["corpus_id"] = corpus_id
         if status:
             query["status"] = status
         results = []

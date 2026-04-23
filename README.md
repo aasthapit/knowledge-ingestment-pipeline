@@ -1,9 +1,12 @@
 # Knowledge Ingestion Pipeline
 
-A tool for building and maintaining AI knowledge bases. It takes documents from various sources — PDFs, Word files, web pages, Confluence wikis — converts them into a searchable format, and gives you a review step before anything reaches your AI agents.
+A tool for building and maintaining AI knowledge bases. It takes documents from various sources — PDFs, Word files, web pages, Confluence wikis, JSONL exports — converts them into a searchable format, and gives you a review step before anything reaches your AI agents.
 
 ```
-Documents (PDF, Word, PowerPoint, HTML, URLs, Confluence, JSONL)
+Knowledge Base (Confluence URLs or JSONL file)
+      │
+      ▼
+  Crawl / Import  ─── fetch Confluence pages or parse JSONL records
       │
       ▼
   Convert & chunk  ─── breaks content into small, retrievable sections
@@ -18,10 +21,13 @@ Documents (PDF, Word, PowerPoint, HTML, URLs, Confluence, JSONL)
       Review Queue  ─── inspect, approve, reject, or edit before anything goes live
             │
             ▼
-      Embed & index ─── sections become searchable vectors in Redis
+      Push to Corpus ─── corpus defines use case context + target vector DB
             │
             ▼
-      Knowledge base ─── AI agents query it; ledger tracks what's there and when
+      Embed & index ─── sections become searchable vectors in the target vector DB
+            │
+            ▼
+      Ledger ─── AI agents query it; ledger tracks what's there and when
 ```
 
 ---
@@ -33,9 +39,56 @@ Most approaches to AI knowledge bases work like this: dump your documents in, em
 This pipeline adds structure around that process:
 
 - **Review before publish** — nothing reaches the AI until a human (or the quality checker) has signed off
-- **Track everything** — every document has a record: what was ingested, when, by whom, for which use case
+- **Track everything** — every document has a record: what was ingested, when, by whom, for which corpus
 - **Detect drift** — for Confluence sources, the system checks whether pages have changed since the last crawl and flags what needs refreshing
-- **Scope by use case** — content is tagged with which AI agent it belongs to, so search results can be filtered to the right context
+- **Scope by corpus** — content is organised into corpora, each carrying a use case ID and agent filter, so search results can be filtered to the right context
+- **Target any vector DB** — each corpus can push to the built-in Redis index or a custom vector DB endpoint
+
+---
+
+## Data Model
+
+### Knowledge Base
+
+A named source of documents. Two types:
+
+- **Confluence** — one or more parent page URLs; the crawler fetches the full page tree
+- **JSONL** — a manually uploaded `.jsonl` file
+
+A Knowledge Base has no use case or agent context — it is purely a source container. One KB can belong to many corpora.
+
+### Data Corpus
+
+A named collection of Knowledge Bases. The corpus carries:
+
+- `usecase_id` — the business use case this content supports (e.g. `GENAI1597_SSOP`)
+- `agent_filter` — the specific AI agent or persona this content is for
+- `vector_store_id` — which vector DB to push to (built-in Redis or a custom endpoint)
+
+When you push a corpus, the pipeline reads from all its KBs' staged documents, embeds them, and writes to the configured vector store.
+
+### Vector Store
+
+A registered vector DB target. Two types:
+
+- **Redis** (built-in default) — uses the Redis Stack instance configured in your `.env`
+- **Custom** — any vector DB that accepts HTTP requests; you provide the base URL, API key, and collection name
+
+### Staging Store
+
+A holding area for documents before they are pushed. Documents are scoped to a Knowledge Base (`kb_id`). The review queue lets you inspect, edit, approve, or reject staged documents before they go live.
+
+### Manifest
+
+A frozen, corpus-scoped snapshot of all pushed JSONL documents at a point in time. Manifests let you:
+
+- Record exactly which sources were in a corpus at a given version
+- Diff two manifests to see what changed
+- Re-ingest all Confluence sources from a saved manifest
+
+### KB Ledger
+
+A permanent record of every document push. Each entry records which KB it came from, which corpus it was pushed for, and the chunk count and drift status.
 
 ---
 
@@ -97,36 +150,42 @@ The first thing you see. Shows how many documents are waiting for review, approv
 
 ---
 
+### Knowledge Bases
+
+Create and manage knowledge bases — the sources that feed your corpora.
+
+**Confluence KB** — provide one or more parent page URLs and set a crawl depth. The KB records the connection so it can be refreshed on a schedule.
+
+**JSONL KB** — upload a `.jsonl` file (one JSON object per line). The importer auto-detects the data format and shows a preview before importing. Custom field mappings let you import from any source without changing your data.
+
+---
+
 ### Add Document
 
-Three ways to get content in:
+Three ways to stage content under a Knowledge Base:
 
-**Upload a file** — PDF, Word (.docx), PowerPoint (.pptx), HTML, plain text, or Markdown. Drag and drop, select the use case it belongs to, and the system handles conversion and chunking.
+**Upload a file** — PDF, Word (.docx), PowerPoint (.pptx), HTML, plain text, or Markdown. Select the target KB and the system handles conversion and chunking.
 
 **From a web address** — Paste a URL. The system fetches and converts the page automatically.
 
-**Bulk JSONL import** — For large batches, upload a `.jsonl` file (one JSON object per line). The importer auto-detects the data format and shows a preview before importing. Custom field mappings let you import from any source without changing your data.
-
-Every document can be tagged with a **use case ID** and **agent filter** — this is how you tell the system which AI agent this content is meant for.
+**Bulk JSONL import** — For large batches, upload a `.jsonl` file. The importer auto-detects the data format and shows a preview before importing.
 
 ---
 
 ### Confluence
 
-Connects directly to Confluence (Cloud or Server/Data Center) and crawls a page tree. You provide the URL of a parent page and it fetches all child pages automatically.
+Connects directly to Confluence (Cloud or Server/Data Center) and crawls a page tree. You select a Knowledge Base of type `confluence` (or create one), then provide the URL of a parent page and it fetches all child pages automatically.
 
 Crawled pages go through the same quality check and review workflow as any other document.
-
-**Drift detection** — after a crawl, the system stores a snapshot of what pages existed and at what version. Clicking "Check drift" later compares that snapshot against the current Confluence state without re-fetching content — showing you exactly which pages were added, removed, or updated since the last crawl.
 
 ---
 
 ### Review Queue
 
-All staged documents appear here, whether auto-approved or flagged for review.
+All staged documents appear here, whether auto-approved or flagged for review. Filter by Knowledge Base to focus on a specific source.
 
 For each document you can see:
-- Which use case and agent it's tagged for
+- Which Knowledge Base it came from
 - Quality signals: how many sections are too short, too long, or boilerplate
 - Content age: a warning if the source is older than 6 months
 - The actual chunks that will go into the knowledge base
@@ -137,7 +196,25 @@ Actions per document:
 - **Edit chunks** — fix content, tags, or section labels before pushing
 - **Split** — break a document into separate pieces if needed
 
-**Push to Knowledge Base** — embeds all approved documents and makes them searchable. For JSONL imports that already include embeddings, this step is instant (no API calls needed).
+**Push to Knowledge Base** — select a corpus to push approved documents to. The corpus defines the use case, agent filter, and target vector DB.
+
+---
+
+### Corpus
+
+Organise Knowledge Bases into named corpora. Each corpus carries:
+
+- The KBs whose content it includes
+- A use case ID and agent filter (used to scope search results)
+- A target vector DB (Redis or custom)
+
+Push a corpus to embed and index all approved documents from its KBs.
+
+---
+
+### Vector Stores
+
+Register and manage vector DB targets. The built-in Redis instance is always available. Add custom entries for any HTTP-compatible vector DB.
 
 ---
 
@@ -149,27 +226,20 @@ Filter by use case or agent to scope results to specific content. Filter by tags
 
 ---
 
-### Use Case Ledger
+### Manifests
 
-The health dashboard for a specific use case + agent pair. Select a use case to see:
+Version your document corpus with named snapshots. A manifest records every document that was live in a corpus at the time it was created.
 
-- **Chunks in KB** — how many sections are currently searchable for this agent
-- **Documents** — which source documents are contributing
-- **Content drift** — whether any sources have changed since they were last pushed
-- **Confluence source** — if registered: last crawl date, next scheduled crawl, page count, and a "Refresh now" button
-- **Pushed documents table** — every document with its quality score, chunk count, and drift status
-
-The **Confluence Sources** sub-tab lets you register Confluence page trees for a use case, set a crawl schedule (standard cron expression), and trigger manual refreshes.
-
-The **Bulk Import** sub-tab accepts a JSON manifest file to register multiple Confluence sources at once.
-
-The **Export JSONL** sub-tab lets you download all chunks for a use case as a JSONL file — useful for sending content to an external embedding pipeline.
+- **Browse** — inspect any manifest and its entries; freeze or archive when ready
+- **Create / Snapshot** — save the current state of a corpus as a frozen manifest
+- **Diff** — compare two manifests to see exactly what changed
+- **Re-ingest** — re-crawl all Confluence sources from a manifest
 
 ---
 
-### KB Health
+### Ledger
 
-Tracks drift for all pushed documents across all knowledge bases. Shows which sources have changed since they were last indexed, which have been deleted, and which are current.
+The health dashboard for pushed documents. Shows which sources have changed since they were last indexed (drift), which have been deleted, and which are current.
 
 ---
 
@@ -193,17 +263,6 @@ When a document is ingested, the system evaluates every chunk individually and f
 A document passes automatically when it has no flagged chunks. Any flag sends it to the review queue for a human to decide.
 
 The quality score is the fraction of clean chunks — a document with 8 clean sections out of 10 scores 0.8.
-
----
-
-## Use cases and agent filters
-
-Every document can be tagged with two fields:
-
-- **Use case ID** — the business use case this content supports (e.g. `GENAI1597_SSOP`)
-- **Agent filter** — the specific AI agent or persona this content is meant for (e.g. `ssop_cloud_operations_agent`)
-
-These fields are stored through the entire lifecycle — staging, review, push, and ledger. The Use Case Ledger page shows you the full picture per use case, and the search page lets you scope results to a specific use case so an agent only retrieves content that's relevant to its context.
 
 ---
 
@@ -234,9 +293,7 @@ If `embedding` is present, it's reused — no API call needed.
   "text":                "Content body...",
   "page_url":            "https://docs.example.com/page",
   "page_name":           "Page title",
-  "section_breadcrumbs": ["Section", "Subsection"],
-  "usecase_id":          "GENAI1597_SSOP",
-  "agent_filter":        "ssop_agent"
+  "section_breadcrumbs": ["Section", "Subsection"]
 }
 ```
 
@@ -338,28 +395,49 @@ knowledge-ingestment-pipeline/
 │
 ├── pages/                    ← UI pages (one file per page)
 │   ├── home.py               ← Dashboard
-│   ├── ingest.py             ← Add Document
+│   ├── kb.py                 ← Knowledge Base management
+│   ├── vector_stores.py      ← Vector store configuration
+│   ├── ingest.py             ← Add Document (file, URL, JSONL)
 │   ├── confluence.py         ← Confluence crawler
+│   ├── corpus.py             ← Corpus management (KB collections + push)
 │   ├── review.py             ← Review Queue
 │   ├── search.py             ← Semantic search
-│   ├── usecase_ledger.py     ← Use Case Ledger (health + Confluence sources + export)
-│   ├── ledger.py             ← KB Health / drift detection
+│   ├── drift.py              ← KB Health / drift detection
+│   ├── ledger.py             ← Ledger (pushed documents)
+│   ├── manifests.py          ← Document manifests (snapshot, diff, re-ingest)
 │   └── status.py             ← Connection status + configuration
 │
-└── pipeline/                 ← Core library
-    ├── config.py             ← Settings from .env
-    ├── converter.py          ← Document conversion (Docling)
-    ├── quality.py            ← Quality assessment (chunk size, boilerplate, recency)
-    ├── chunker.py            ← Document chunking
-    ├── embedder.py           ← Embedding (OpenAI / Azure / local)
-    ├── mongo_store.py        ← Staging store, KB ledger, Use Case ledger
-    ├── redis_store.py        ← Vector search index (Redis RediSearch)
-    ├── ingest.py             ← Ingestion orchestration
-    ├── review.py             ← Approve / reject / push workflow
-    ├── jsonl_importer.py     ← JSONL import with custom schema support
-    ├── confluence.py         ← Confluence REST API crawler
-    ├── refresh_scheduler.py  ← Background Confluence refresh scheduler
-    └── exporter.py           ← JSONL export
+├── pipeline/                 ← Core library
+│   ├── config.py             ← Settings from .env
+│   ├── converter.py          ← Document conversion (Docling)
+│   ├── quality.py            ← Quality assessment (chunk size, boilerplate, recency)
+│   ├── chunker.py            ← Document chunking
+│   ├── embedder.py           ← Embedding (OpenAI / Azure / local)
+│   ├── mongo_store.py        ← Staging store, KB ledger, Corpus store, KB store, VS config store
+│   ├── redis_store.py        ← Vector search index (Redis RediSearch)
+│   ├── vector_store.py       ← Abstract vector DB client (Redis + custom HTTP)
+│   ├── ingest.py             ← Ingestion orchestration
+│   ├── review.py             ← Approve / reject / push workflow
+│   ├── manifests.py          ← Manifest management (snapshot, diff, re-ingest)
+│   ├── jsonl_importer.py     ← JSONL import with custom schema support
+│   ├── confluence.py         ← Confluence REST API crawler
+│   ├── refresh_scheduler.py  ← Background Confluence refresh scheduler
+│   └── exporter.py           ← JSONL export
+│
+└── api/                      ← FastAPI REST API
+    ├── main.py               ← App entry point + router registration
+    ├── models.py             ← Pydantic request/response models
+    └── routers/
+        ├── kb.py             ← Knowledge Base CRUD
+        ├── vector_stores.py  ← Vector store config CRUD
+        ├── corpus.py         ← Corpus CRUD + push
+        ├── ingest.py         ← Document / JSONL upload
+        ├── confluence.py     ← Confluence crawl
+        ├── review.py         ← Staging review + push
+        ├── manifests.py      ← Manifest operations
+        ├── search.py         ← Semantic search
+        ├── ledger.py         ← Ledger queries
+        └── status.py         ← Health check
 ```
 
 ---
@@ -367,18 +445,20 @@ knowledge-ingestment-pipeline/
 ## CLI reference
 
 ```bash
-# Ingest a document (file or URL)
-python cli.py ingest doc path/to/file.pdf --tags finance
+# Ingest a document (file or URL) into a Knowledge Base
+python cli.py ingest doc path/to/file.pdf --kb-id <kb-id> --tags finance
 
-# Import a JSONL bulk file
-python cli.py ingest jsonl export.jsonl --tags openshift
+# Import a JSONL bulk file into a Knowledge Base
+python cli.py ingest jsonl export.jsonl --kb-id <kb-id> --tags openshift
 
 # List staged documents
 python cli.py review list
 
-# Approve and push a document
+# Approve a document
 python cli.py review approve <doc-id>
-python cli.py review push
+
+# Push approved documents for a corpus
+python cli.py review push --corpus-id <corpus-id>
 
 # Search
 python cli.py query "How do I configure persistent storage?"
