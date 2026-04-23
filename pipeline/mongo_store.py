@@ -1016,9 +1016,11 @@ class UsecaseLedger:
         return doc
 
     def list_confluence_sources(self) -> list[dict[str, Any]]:
-        """Return all registered Confluence source configs."""
+        """Return all registered Confluence source configs (excludes page snapshots)."""
         results = []
-        for doc in self._sources.find({}, sort=[("usecase_id", ASCENDING)]):
+        for doc in self._sources.find(
+            {}, {"crawled_pages": 0}, sort=[("usecase_id", ASCENDING)]
+        ):
             doc["source_id"] = str(doc.pop("_id"))
             for key in ("last_refresh_at", "next_refresh_at", "created_at", "updated_at"):
                 val = doc.get(key)
@@ -1080,6 +1082,29 @@ class UsecaseLedger:
             {"_id": ObjectId(source_id)},
             {"$set": {"next_refresh_at": next_dt}},
         )
+
+    def record_crawl_snapshot(self, source_id: str, pages: list[dict]) -> None:
+        """
+        Store page metadata snapshot after a crawl for drift tracking.
+        Each entry: ``{page_id, title, version, last_modified}``.
+        """
+        from bson import ObjectId
+        self._sources.update_one(
+            {"_id": ObjectId(source_id)},
+            {"$set": {
+                "crawled_pages":      pages,
+                "crawled_page_count": len(pages),
+                "updated_at":         datetime.now(timezone.utc),
+            }},
+        )
+
+    def get_crawl_snapshot(self, source_id: str) -> list[dict]:
+        """Return the stored page metadata snapshot for a source, or []."""
+        from bson import ObjectId
+        doc = self._sources.find_one(
+            {"_id": ObjectId(source_id)}, {"crawled_pages": 1}
+        )
+        return (doc or {}).get("crawled_pages") or []
 
 
 # ---------------------------------------------------------------------------

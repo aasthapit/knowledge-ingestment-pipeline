@@ -1,78 +1,85 @@
 # Knowledge Ingestion Pipeline
 
-A multi-format document ingestion pipeline with a quality gate, human review workflow, and Streamlit UI. Converts documents into vector embeddings stored in Redis or Qdrant. Uses MongoDB to track document staging and detect content drift over time.
+A tool for building and maintaining AI knowledge bases. It takes documents from various sources — PDFs, Word files, web pages, Confluence wikis — converts them into a searchable format, and gives you a review step before anything reaches your AI agents.
 
 ```
-Sources (PDF, DOCX, PPTX, HTML, URL, Markdown, JSONL, Confluence)
+Documents (PDF, Word, PowerPoint, HTML, URLs, Confluence, JSONL)
       │
       ▼
-  Docling converter  ─── extracts text + citation metadata
+  Convert & chunk  ─── breaks content into small, retrievable sections
       │
       ▼
-  Quality assessor   ─── scores structure 0–1; auto-tags headings
+  Quality check    ─── flags sections that are too short, too long, boilerplate, or stale
       │
-      ├── score ≥ threshold → auto-approved
-      └── score < threshold → pending human review
+      ├── all clear → auto-approved
+      └── flagged   → sent to human review queue
             │
             ▼
-      MongoDB staging  ← Review Queue (approve / reject / inspect)
+      Review Queue  ─── inspect, approve, reject, or edit before anything goes live
             │
             ▼
-      Embedder (OpenAI / Azure / sentence-transformers)
+      Embed & index ─── sections become searchable vectors in Redis
             │
             ▼
-      Vector store (Redis RediSearch  or  Qdrant)
-            │
-            ▼
-      KB Ledger (MongoDB) ← drift detection
+      Knowledge base ─── AI agents query it; ledger tracks what's there and when
 ```
+
+---
+
+## What problem does this solve?
+
+Most approaches to AI knowledge bases work like this: dump your documents in, embed them all, run a search. That works for demos but becomes unmanageable quickly — stale content accumulates, low-quality chunks degrade search results, and you have no record of what's actually in the index or when it was last updated.
+
+This pipeline adds structure around that process:
+
+- **Review before publish** — nothing reaches the AI until a human (or the quality checker) has signed off
+- **Track everything** — every document has a record: what was ingested, when, by whom, for which use case
+- **Detect drift** — for Confluence sources, the system checks whether pages have changed since the last crawl and flags what needs refreshing
+- **Scope by use case** — content is tagged with which AI agent it belongs to, so search results can be filtered to the right context
 
 ---
 
 ## Quick Start
 
-### 1. Prerequisites
+### Prerequisites
 
-| Service | Purpose | Local Docker command |
+| Service | Purpose | Local Docker |
 |---|---|---|
-| MongoDB 7+ | Staging store + KB ledger | `docker run -p 27017:27017 mongo:7` |
-| Redis Stack | Vector database (default) | `docker run -p 6379:6379 redis/redis-stack-server:latest` |
-| Qdrant *(optional)* | Production vector DB | `docker run -p 6333:6333 qdrant/qdrant` |
+| MongoDB 7+ | Staging queue + knowledge base ledger | `docker run -p 27017:27017 mongo:7` |
+| Redis Stack | Vector search index | `docker run -p 6379:6379 redis/redis-stack-server:latest` |
 
-### 2. Install
+### Install
 
 ```bash
 git clone <repo-url>
 cd knowledge-ingestment-pipeline
 
 # Recommended — uses uv
-UV_LINK_MODE=copy uv sync --python python3.13
+uv sync --python python3.13
 
 # Or plain pip
-python -m venv .venv
-.venv\Scripts\activate        # Windows
 pip install -e .
 ```
 
-### 3. Configure
+### Configure
 
 ```bash
-copy .env.example .env   # Windows
-cp  .env.example .env    # macOS / Linux
+cp .env.example .env   # macOS / Linux
+copy .env.example .env # Windows
 ```
 
 Edit `.env` and set at minimum:
 
 ```env
 OPENAI_API_KEY=sk-...
-MONGODB_HOST=localhost
+MONGODB_URI=mongodb://localhost:27017
 MONGODB_TLS=false        # for a plain local MongoDB
 REDIS_URL=redis://localhost:6379
 ```
 
 See [Configuration reference](#configuration-reference) for all options.
 
-### 4. Run the UI
+### Run
 
 ```bash
 streamlit run app.py
@@ -82,186 +89,175 @@ Open `http://localhost:8501` in your browser.
 
 ---
 
-## UI Pages
+## How it works — the UI
 
-### Dashboard (`/`)
+### Dashboard
 
-Live summary of the staging queue and vector store. Shows counts of pending, approved, and pushed documents, plus quick-action buttons to jump to common tasks.
-
----
-
-### Add Document (`/ingest`)
-
-Three tabs for different input types.
-
-**Upload a File**
-
-Drag and drop or browse for: PDF, Word (.docx), PowerPoint (.pptx), HTML, plain text (.txt), or Markdown (.md).
-
-Docling converts the file automatically — no manual formatting required.
-
-**From a Web Address**
-
-Paste any HTTP/HTTPS URL. The pipeline fetches and converts the page.
-
-**Bulk JSONL Import**
-
-Upload a `.jsonl` file. The importer auto-detects the schema (see [JSONL Schemas](#jsonl-schemas)) and shows a preview of the first 5 records before importing.
-
-**Options (all tabs)**
-
-| Option | Description |
-|---|---|
-| Tags | Comma-separated keywords applied to every chunk |
-| Knowledge base | Logical KB name for grouping and drift tracking (default: `default`) |
-| Quality threshold | Override the default 0.6 threshold for this import |
-| Push directly | Skip the review step if quality passes |
+The first thing you see. Shows how many documents are waiting for review, approved and ready to push, and already live in the knowledge base. Quick links to the most common tasks.
 
 ---
 
-### Confluence (`/confluence`)
+### Add Document
 
-Crawl a Confluence page tree directly into the knowledge base.
+Three ways to get content in:
 
-1. Enter your Confluence base URL (e.g. `https://mycompany.atlassian.net`)
-2. Choose **Cloud** (email + API token) or **Server / DC** (Personal Access Token)
-3. Paste the URL of the parent page — all sub-pages are fetched automatically
-4. Set max depth (`-1` = entire tree), KB name, and any extra tags
-5. Choose whether to **stage**, **download as JSONL**, or both
-6. Click **Start crawl**
+**Upload a file** — PDF, Word (.docx), PowerPoint (.pptx), HTML, plain text, or Markdown. Drag and drop, select the use case it belongs to, and the system handles conversion and chunking.
 
-Pages are output in pipeline schema (see [JSONL Schemas](#jsonl-schemas)) and staged directly in the Review Queue.
+**From a web address** — Paste a URL. The system fetches and converts the page automatically.
 
-**Getting a token**
+**Bulk JSONL import** — For large batches, upload a `.jsonl` file (one JSON object per line). The importer auto-detects the data format and shows a preview before importing. Custom field mappings let you import from any source without changing your data.
 
-- **Cloud:** [id.atlassian.com → Security → API tokens](https://id.atlassian.com/manage-profile/security/api-tokens)
-- **Server/DC:** Your profile → Personal Access Tokens
+Every document can be tagged with a **use case ID** and **agent filter** — this is how you tell the system which AI agent this content is meant for.
 
 ---
 
-### Review Queue (`/review`)
+### Confluence
 
-Lists all staged documents. Filter by status: All, Pending review, Approved, Pushed.
+Connects directly to Confluence (Cloud or Server/Data Center) and crawls a page tree. You provide the URL of a parent page and it fetches all child pages automatically.
 
-For each document you can:
+Crawled pages go through the same quality check and review workflow as any other document.
 
-- **Approve** — marks the document ready to push
+**Drift detection** — after a crawl, the system stores a snapshot of what pages existed and at what version. Clicking "Check drift" later compares that snapshot against the current Confluence state without re-fetching content — showing you exactly which pages were added, removed, or updated since the last crawl.
+
+---
+
+### Review Queue
+
+All staged documents appear here, whether auto-approved or flagged for review.
+
+For each document you can see:
+- Which use case and agent it's tagged for
+- Quality signals: how many sections are too short, too long, or boilerplate
+- Content age: a warning if the source is older than 6 months
+- The actual chunks that will go into the knowledge base
+
+Actions per document:
+- **Approve** — marks it ready to push
 - **Reject** — removes it from the queue with an optional reason
-- **Inspect** — see quality flags, sample chunks, metadata
-- **Push to Knowledge Base** — embeds approved chunks and upserts them into the vector store
+- **Edit chunks** — fix content, tags, or section labels before pushing
+- **Split** — break a document into separate pieces if needed
 
-Documents that pass the quality threshold are auto-approved on ingest. Only low-scoring documents require manual review here.
-
----
-
-### Search (`/search`)
-
-Semantic search over the vector store. Results include relevance score, section breadcrumb, source citation, and page number (for PDF/DOCX). Filter by tag.
+**Push to Knowledge Base** — embeds all approved documents and makes them searchable. For JSONL imports that already include embeddings, this step is instant (no API calls needed).
 
 ---
 
-### KB Health (`/drift`)
+### Search
 
-Tracks which pushed documents are still current.
+Semantic search over the knowledge base. Type a question in plain language and get back the most relevant sections, with source citations and page numbers.
 
-| Status | Meaning |
+Filter by use case or agent to scope results to specific content. Filter by tags or document type.
+
+---
+
+### Use Case Ledger
+
+The health dashboard for a specific use case + agent pair. Select a use case to see:
+
+- **Chunks in KB** — how many sections are currently searchable for this agent
+- **Documents** — which source documents are contributing
+- **Content drift** — whether any sources have changed since they were last pushed
+- **Confluence source** — if registered: last crawl date, next scheduled crawl, page count, and a "Refresh now" button
+- **Pushed documents table** — every document with its quality score, chunk count, and drift status
+
+The **Confluence Sources** sub-tab lets you register Confluence page trees for a use case, set a crawl schedule (standard cron expression), and trigger manual refreshes.
+
+The **Bulk Import** sub-tab accepts a JSON manifest file to register multiple Confluence sources at once.
+
+The **Export JSONL** sub-tab lets you download all chunks for a use case as a JSONL file — useful for sending content to an external embedding pipeline.
+
+---
+
+### KB Health
+
+Tracks drift for all pushed documents across all knowledge bases. Shows which sources have changed since they were last indexed, which have been deleted, and which are current.
+
+---
+
+### Status
+
+Connection health for Redis, MongoDB, and the embedding provider. Shows the current chunk count and pipeline configuration.
+
+---
+
+## Quality checks
+
+When a document is ingested, the system evaluates every chunk individually and flags:
+
+| Signal | What it means |
 |---|---|
-| ✅ Current | Source file unchanged since last push |
-| ⚠️ Stale | Source file has been modified — re-ingest recommended |
-| 🗑️ Deleted | Source file no longer exists |
-| ❓ Unknown | URL source (cannot detect changes without fetching) |
+| **Too short** (< 100 chars) | Section stubs, navigation fragments, or empty headings — likely useless for search |
+| **Too long** (> 2 000 chars) | May get truncated by the embedding model, degrading retrieval quality |
+| **Boilerplate** | Navigation menus, table of contents, login prompts, copyright footers — noise |
+| **Stale** (> 6 months old) | Content from the source's creation or modification date — worth checking if still accurate |
 
-Click **Check for changes** to run a full drift scan. Stale file-based documents show a **Re-ingest** button that re-processes and re-pushes in one click.
+A document passes automatically when it has no flagged chunks. Any flag sends it to the review queue for a human to decide.
 
----
-
-### Status (`/status`)
-
-Connection health for Redis, MongoDB, and OpenAI. Shows index stats, chunk counts, and current configuration.
+The quality score is the fraction of clean chunks — a document with 8 clean sections out of 10 scores 0.8.
 
 ---
 
-## JSONL Schemas
+## Use cases and agent filters
 
-JSONL files must have one JSON object per line (UTF-8). The importer auto-detects which schema is in use from the first record.
+Every document can be tagged with two fields:
 
-### Built-in: Pipeline schema
+- **Use case ID** — the business use case this content supports (e.g. `GENAI1597_SSOP`)
+- **Agent filter** — the specific AI agent or persona this content is meant for (e.g. `ssop_cloud_operations_agent`)
 
-Produced by the pipeline's own exporter and the Confluence crawler. Detected when a record contains both `content` and `source`.
+These fields are stored through the entire lifecycle — staging, review, push, and ledger. The Use Case Ledger page shows you the full picture per use case, and the search page lets you scope results to a specific use case so an agent only retrieves content that's relevant to its context.
+
+---
+
+## JSONL import formats
+
+The importer auto-detects which format a file uses from the first record.
+
+**Pipeline schema** — the format this system exports:
 
 ```json
 {
   "chunk_id":  "abc-123",
   "source":    "https://docs.example.com/guide",
   "title":     "Guide Title",
-  "section":   "Guide Title > Installation > Docker",
-  "content":   "Run the following command to install...",
+  "section":   "Installation > Docker",
+  "content":   "Run the following command...",
   "tags":      ["docker", "install"],
-  "metadata":  {},
   "embedding": [0.012, -0.034, 0.019]
 }
 ```
 
-| Field | Required | Notes |
-|---|---|---|
-| `content` | **yes** | Chunk body text |
-| `source` | **yes** | URL or file path |
-| `title` | no | Document title |
-| `section` | no | Breadcrumb string |
-| `chunk_id` | no | Auto-generated UUID if absent |
-| `tags` | no | List of strings |
-| `metadata` | no | Arbitrary dict, passed through |
-| `embedding` | no | Pre-computed float array — **skips API call if present** |
+If `embedding` is present, it's reused — no API call needed.
 
-### Built-in: Crawler schema
-
-Produced by `crawl_ocp_docs.py`. Detected when a record contains both `text` and `page_url`.
+**Crawler schema** — produced by web crawlers (detected by `text` + `page_url`):
 
 ```json
 {
-  "chunk_id":            "abc-123",
-  "text":                "OpenShift Container Platform installation...",
-  "page_url":            "https://docs.openshift.com/container-platform/4.18/...",
-  "page_name":           "Installation overview",
-  "section_heading":     "Prerequisites",
-  "section_breadcrumbs": ["Installation", "Prerequisites"],
-  "agent_filter":        "openshift",
-  "usecase_id":          "install",
-  "data_classification": "public"
+  "text":                "Content body...",
+  "page_url":            "https://docs.example.com/page",
+  "page_name":           "Page title",
+  "section_breadcrumbs": ["Section", "Subsection"],
+  "usecase_id":          "GENAI1597_SSOP",
+  "agent_filter":        "ssop_agent"
 }
 ```
 
-`agent_filter`, `usecase_id`, and `data_classification` become tags automatically.
-
-### Custom schemas
-
-Define your own field mappings in [`schemas.yaml`](schemas.yaml) at the project root. Custom schemas are checked **before** the built-ins.
+**Custom schemas** — define your own field mappings in `schemas.yaml` without writing code:
 
 ```yaml
 schemas:
   - name: my_docs
     detect:
-      required: [body, url]      # ALL must be present to match
-      exclude:  [page_url]       # ANY present disqualifies the match
+      required: [body, url]
     fields:
-      content:  body             # chunk body
-      source:   url              # URL or file path
-      title:    page_title       # document title
-      section:  category         # section string (list joined with section_join)
-      chunk_id: id
-      tags:     labels           # list of strings or comma-separated string
-      embedding: vector          # float array — reused if present
-    tags_static: [internal]      # always added to every chunk
-    section_join: " > "          # how to join list-type section fields
+      content:  body
+      source:   url
+      title:    page_title
+      tags:     labels
+    tags_static: [internal]
 ```
-
-Field paths support dot notation for nested fields: `source: _links.webui` resolves `record["_links"]["webui"]`.
-
-After editing `schemas.yaml` the running Streamlit app picks up the changes on the next import (no restart needed).
 
 ---
 
-## Configuration Reference
+## Configuration reference
 
 All settings are loaded from `.env` (or environment variables). Copy `.env.example` to `.env` to get started.
 
@@ -269,7 +265,7 @@ All settings are loaded from `.env` (or environment variables). Copy `.env.examp
 
 | Variable | Default | Description |
 |---|---|---|
-| `EMBEDDING_PROVIDER` | `openai` | `openai` \| `azure` \| `sentence-transformers` |
+| `EMBEDDING_PROVIDER` | `openai` | `openai` \| `azure` \| `sentence-transformers` \| `custom` |
 | `EMBEDDING_MODEL` | `text-embedding-3-small` | Model name |
 | `EMBEDDING_DIMENSIONS` | `1536` | Must match the model output |
 | `OPENAI_API_KEY` | — | Required when provider is `openai` |
@@ -278,143 +274,115 @@ All settings are loaded from `.env` (or environment variables). Copy `.env.examp
 | `AZURE_OPENAI_DEPLOYMENT` | — | Required when provider is `azure` |
 | `EMBED_BATCH_SIZE` | `32` | Chunks per embedding API call |
 
-### Vector store
+### Custom embedding endpoint
+
+To use any OpenAI-compatible embedding API (e.g. a local Ollama instance):
+
+| Variable | Description |
+|---|---|
+| `EMBEDDING_CUSTOM_URL` | Your endpoint, e.g. `http://localhost:11434/v1/embeddings` |
+| `EMBEDDING_CUSTOM_API_KEY` | API key if required |
+| `EMBEDDING_CUSTOM_HEADERS` | Extra HTTP headers as a JSON object |
+
+### Vector store (Redis)
 
 | Variable | Default | Description |
 |---|---|---|
-| `VECTOR_BACKEND` | `redis` | `redis` \| `qdrant` |
 | `REDIS_URL` | `redis://localhost:6379` | Redis Stack connection string |
 | `REDIS_INDEX_NAME` | `knowledge_index` | RediSearch index name |
-| `QDRANT_URL` | `http://localhost:6333` | Qdrant server URL |
-| `QDRANT_API_KEY` | — | Qdrant Cloud API key |
-| `QDRANT_COLLECTION` | `knowledge_base` | Qdrant collection name |
+| `REDIS_KEY_PREFIX` | `doc:` | Key prefix for stored chunks |
 
 ### MongoDB
 
 | Variable | Default | Description |
 |---|---|---|
-| `MONGODB_HOST` | `localhost` | MongoDB hostname |
-| `MONGODB_PORT` | `27017` | MongoDB port |
+| `MONGODB_URI` | — | Full connection string — overrides all other MongoDB settings when set |
+| `MONGODB_HOST` | `localhost` | Hostname (ignored when MONGODB_URI is set) |
+| `MONGODB_PORT` | `27017` | Port (ignored when MONGODB_URI is set) |
 | `MONGODB_USERNAME` | — | Leave empty for no auth |
 | `MONGODB_PASSWORD` | — | Leave empty for no auth |
-| `MONGODB_AUTH_SOURCE` | — | Auth database; use `$external` for LDAP/X.509 |
 | `MONGODB_TLS` | `true` | Set `false` for plain local instances |
+| `MONGODB_TLS_INSECURE` | `false` | Skip certificate verification (self-signed certs) |
+| `MONGODB_SRV` | `true` | Use DNS SRV discovery — required for Atlas; set `false` for direct connections |
 | `MONGODB_DB_NAME` | `knowledge_pipeline` | Database name |
-| `MONGODB_COLLECTION_PREFIX` | — | Optional prefix, e.g. `prod_` |
+| `MONGODB_COLLECTION_PREFIX` | — | Optional prefix, e.g. `prod_` to separate environments |
 
 ### Pipeline
 
 | Variable | Default | Description |
 |---|---|---|
-| `QUALITY_THRESHOLD` | `0.6` | Auto-approve above this score (0–1) |
 | `DOCLING_MAX_TOKENS` | `512` | Max tokens per chunk (≈ 400 words) |
-| `CHUNK_MAX_CHARS` | `2000` | Max chars per chunk (legacy Markdown path) |
+| `CHUNK_MAX_CHARS` | `2000` | Max characters per chunk |
 | `CHUNK_OVERLAP_CHARS` | `200` | Overlap between consecutive chunks |
 | `JSONL_OUTPUT_DIR` | `./output` | Default JSONL export directory |
 
+### Confluence
+
+| Variable | Description |
+|---|---|
+| `CONFLUENCE_BASE_URL` | Your Confluence base URL, e.g. `https://mycompany.atlassian.net` |
+| `CONFLUENCE_AUTH_TYPE` | `cloud` (email + API token) or `server` (Personal Access Token) |
+| `CONFLUENCE_EMAIL` | Required for Cloud auth |
+| `CONFLUENCE_API_TOKEN` | API token (Cloud) or Personal Access Token (Server) |
+
 ---
 
-## Project Structure
+## Project layout
 
 ```
 knowledge-ingestment-pipeline/
-├── app.py                    ← Streamlit entry point  (streamlit run app.py)
-├── cli.py                    ← CLI entry point        (python cli.py --help)
-├── schemas.yaml              ← Custom JSONL schema definitions
+├── app.py                    ← Streamlit entry point
+├── cli.py                    ← Command-line interface
+├── schemas.yaml              ← Custom JSONL field mapping definitions
 ├── .env.example              ← Copy to .env and fill in
 │
-├── pages/                    ← Streamlit UI pages
+├── pages/                    ← UI pages (one file per page)
 │   ├── home.py               ← Dashboard
-│   ├── ingest.py             ← Add Document (file / URL / JSONL)
-│   ├── confluence.py         ← Confluence page-tree importer
+│   ├── ingest.py             ← Add Document
+│   ├── confluence.py         ← Confluence crawler
 │   ├── review.py             ← Review Queue
 │   ├── search.py             ← Semantic search
-│   ├── drift.py              ← KB Health / drift detection
-│   └── status.py             ← Connection status + config
+│   ├── usecase_ledger.py     ← Use Case Ledger (health + Confluence sources + export)
+│   ├── ledger.py             ← KB Health / drift detection
+│   └── status.py             ← Connection status + configuration
 │
 └── pipeline/                 ← Core library
-    ├── config.py             ← Settings loaded from .env
-    ├── converter.py          ← Docling document conversion + Citation dataclass
-    ├── quality.py            ← Quality scoring (0–1) + auto-tagging
-    ├── chunker.py            ← Docling HybridChunker + legacy Markdown chunker
-    ├── embedder.py           ← OpenAI / Azure / sentence-transformers
-    ├── mongo_store.py        ← MongoStagingStore + KBLedger (drift tracking)
-    ├── redis_store.py        ← RediSearch vector index
-    ├── qdrant_store.py       ← Qdrant vector index
-    ├── ingest.py             ← High-level orchestration
+    ├── config.py             ← Settings from .env
+    ├── converter.py          ← Document conversion (Docling)
+    ├── quality.py            ← Quality assessment (chunk size, boilerplate, recency)
+    ├── chunker.py            ← Document chunking
+    ├── embedder.py           ← Embedding (OpenAI / Azure / local)
+    ├── mongo_store.py        ← Staging store, KB ledger, Use Case ledger
+    ├── redis_store.py        ← Vector search index (Redis RediSearch)
+    ├── ingest.py             ← Ingestion orchestration
     ├── review.py             ← Approve / reject / push workflow
     ├── jsonl_importer.py     ← JSONL import with custom schema support
     ├── confluence.py         ← Confluence REST API crawler
-    ├── exporter.py           ← JSONL export
-    └── tagger.py             ← Tag management
+    ├── refresh_scheduler.py  ← Background Confluence refresh scheduler
+    └── exporter.py           ← JSONL export
 ```
 
 ---
 
-## CLI Reference
-
-```
-python cli.py --help
-```
-
-### Ingest commands
+## CLI reference
 
 ```bash
-# Single file (PDF, DOCX, PPTX, HTML, Markdown, or URL)
-python cli.py ingest doc path/to/file.pdf --tags finance --kb-name my-kb
+# Ingest a document (file or URL)
+python cli.py ingest doc path/to/file.pdf --tags finance
 
-# Single Markdown file (legacy — direct to Redis, no review step)
-python cli.py ingest file docs/guide.md --tags internal
+# Import a JSONL bulk file
+python cli.py ingest jsonl export.jsonl --tags openshift
 
-# Directory of Markdown files (legacy)
-python cli.py ingest dir ./docs --tags team-a
-
-# JSONL bulk import
-python cli.py ingest jsonl export.jsonl --tags openshift --kb-name ocp-docs
-```
-
-### Review commands
-
-```bash
-# List all staged documents
+# List staged documents
 python cli.py review list
 
-# Show detail for one document
-python cli.py review show <doc-id>
-
-# Approve a document
+# Approve and push a document
 python cli.py review approve <doc-id>
-
-# Reject a document
-python cli.py review reject <doc-id> --reason "Duplicate content"
-
-# Push all approved documents to the vector store
 python cli.py review push
 
-# Push a specific document
-python cli.py review push --doc-id <doc-id>
+# Search
+python cli.py query "How do I configure persistent storage?"
 ```
-
-### Search
-
-```bash
-python cli.py query "How do I configure persistent storage in OpenShift?"
-python cli.py query "RBAC roles" --top-k 10 --tag-filter openshift
-```
-
----
-
-## Switching Embedding Models
-
-Update `EMBEDDING_MODEL` and `EMBEDDING_DIMENSIONS` in `.env`. If dimensions change you must drop and recreate the vector index:
-
-**Redis:**
-```bash
-python cli.py index drop --delete-docs
-python cli.py index create
-```
-
-**Qdrant:**  Delete the collection in the Qdrant dashboard or via API, then push again.
 
 ---
 

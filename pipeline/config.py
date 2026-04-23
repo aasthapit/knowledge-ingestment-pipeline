@@ -54,18 +54,6 @@ class Settings:
         Path(os.getenv("LEDGER_OUTPUT_DIR")) if os.getenv("LEDGER_OUTPUT_DIR") else None
     )
 
-    # ── Quality Assessment ────────────────────────────────────────────────
-    quality_threshold: float = float(os.getenv("QUALITY_THRESHOLD", "0.6"))
-
-    # ── Vector Backend ────────────────────────────────────────────────────
-    # "redis" uses existing RediSearch index; "qdrant" pushes to Qdrant
-    vector_backend: Literal["redis", "qdrant"] = os.getenv("VECTOR_BACKEND", "redis")  # type: ignore[assignment]
-
-    # ── Qdrant ────────────────────────────────────────────────────────────
-    qdrant_url: str = os.getenv("QDRANT_URL", "http://localhost:6333")
-    qdrant_api_key: str = os.getenv("QDRANT_API_KEY", "")
-    qdrant_collection: str = os.getenv("QDRANT_COLLECTION", "knowledge_base")
-
     # ── Docling Chunker ───────────────────────────────────────────────────
     # Max tokens per chunk when using HybridChunker
     docling_max_tokens: int = int(os.getenv("DOCLING_MAX_TOKENS", "512"))

@@ -137,9 +137,10 @@ def ingest_directory(
 def ingest_document(
     source: str | Path,
     extra_tags: list[str] | None = None,
-    quality_threshold: float | None = None,
     auto_push: bool = False,
     kb_name: str = "default",
+    usecase_id: str | None = None,
+    agent_filter: str | None = None,
 ) -> dict:
     """
     Ingest any supported document format through the full pipeline.
@@ -147,14 +148,13 @@ def ingest_document(
     Steps
     -----
     1. Convert with Docling (PDF, DOCX, PPTX, HTML, URL, Markdown).
-    2. Assess structural quality.
-    3. Auto-tag from headings if quality passes.
-    4. Chunk with HybridChunker (preserving citation metadata per chunk).
-    5. Stage all chunks in Redis (StagingStore).
-       - Quality PASS → status ``approved``
-       - Quality FAIL → status ``pending_review`` (requires human decision)
-    6. If ``auto_push=True`` and quality passes, immediately embed and push
-       to the configured vector backend.
+    2. Auto-tag from headings.
+    3. Chunk with HybridChunker (preserving citation metadata per chunk).
+    4. Assess quality per chunk: size, boilerplate, and document recency.
+       - All chunks clean + not stale → status ``approved``
+       - Any flag → status ``pending_review`` (requires human decision)
+    5. Stage all chunks in MongoDB.
+    6. If ``auto_push=True`` and quality passes, immediately embed and push.
 
     Parameters
     ----------
@@ -162,43 +162,37 @@ def ingest_document(
         File path or HTTP/HTTPS URL.
     extra_tags:
         Additional tags merged with the auto-generated ones.
-    quality_threshold:
-        Override ``settings.quality_threshold`` for this call.
     auto_push:
         If True, auto-approved documents are embedded and pushed immediately
         without waiting for an explicit ``review push`` command.
     kb_name:
         Logical knowledge base name for ledger grouping and drift tracking.
-        Defaults to ``"default"``.
+    usecase_id:
+        Business use-case identifier for the Use Case Ledger.
+    agent_filter:
+        Target agent/persona identifier for the Use Case Ledger.
 
     Returns
     -------
     dict
         ``{doc_id, title, quality_score, quality_passed, status,
-           chunk_count, tags, flags}``
+           chunk_count, tags, flags, age_days, is_stale}``
     """
     from pipeline.converter import convert_document
-    from pipeline.quality import assess_quality, extract_tags
+    from pipeline.quality import assess_document, extract_tags
     from pipeline.review import push_approved
-
-    threshold = quality_threshold if quality_threshold is not None else settings.quality_threshold
 
     # 1 — Convert
     converted = convert_document(source)
     citation = converted.citation
 
-    # 2 — Quality assessment
-    result = assess_quality(converted)
-
-    # 3 — Determine tags
+    # 2 — Auto-tag from headings (always, not gated on quality)
     tags = list(extra_tags or [])
-    if result.passed:
-        # Merge auto-suggested tags (quality assessor already extracted them)
-        for t in result.suggested_tags:
-            if t not in tags:
-                tags.append(t)
+    for t in extract_tags(converted.markdown, title=citation.title):
+        if t not in tags:
+            tags.append(t)
 
-    # 4 — Chunk
+    # 3 — Chunk
     chunks = chunker.chunk_docling(
         converted,
         tags=tags,
@@ -208,30 +202,49 @@ def ingest_document(
     if not chunks:
         logger.warning("No chunks produced from '%s'.", source)
 
-    # 5 — Stage in Redis
+    # 4 — Quality assessment (chunk-aware + recency)
+    result = assess_document(chunks, citation)
+
+    # Annotate each chunk dict with its per-chunk quality flags
+    chunk_dicts = []
+    for i, chunk in enumerate(chunks):
+        d = chunk.to_dict()
+        per_chunk = result.chunk_flags.get(i)
+        if per_chunk:
+            d.setdefault("metadata", {})["quality_flags"] = per_chunk
+        chunk_dicts.append(d)
+
+    # 5 — Stage in MongoDB
     doc_id = str(uuid.uuid5(uuid.NAMESPACE_URL, str(source)))
     status = "approved" if result.passed else "pending_review"
 
     meta = {
-        "doc_id":           doc_id,
-        "title":            citation.title,
-        "source_path":      citation.source_path,
-        "source_type":      citation.source_type,
-        "author":           citation.author or "",
-        "created_date":     citation.created_date or "",
-        "url":              citation.url or "",
-        "page_count":       citation.page_count or 0,
-        "quality_score":    round(result.score, 4),
-        "quality_passed":   int(result.passed),
-        "quality_flags":    json.dumps(result.flags),
-        "suggested_tags":   json.dumps(tags),
-        "chunk_count":      len(chunks),
-        "status":           status,
-        "kb_name":          kb_name,
+        "doc_id":             doc_id,
+        "title":              citation.title,
+        "source_path":        citation.source_path,
+        "source_type":        citation.source_type,
+        "author":             citation.author or "",
+        "created_date":       citation.created_date or "",
+        "url":                citation.url or "",
+        "page_count":         citation.page_count or 0,
+        "quality_score":      round(result.score, 4),
+        "quality_passed":     int(result.passed),
+        "quality_flags":      json.dumps(result.flags),
+        "suggested_tags":     json.dumps(tags),
+        "chunk_count":        len(chunks),
+        "status":             status,
+        "kb_name":            kb_name,
+        "usecase_id":         usecase_id or None,
+        "agent_filter":       agent_filter or None,
+        "age_days":           result.age_days,
+        "is_stale":           result.is_stale,
+        "chunks_too_short":   result.chunks_too_short,
+        "chunks_too_long":    result.chunks_too_long,
+        "chunks_boilerplate": result.chunks_boilerplate,
     }
 
     staging = mongo_store.get_staging()
-    staging.enqueue(doc_id, meta, [c.to_dict() for c in chunks])
+    staging.enqueue(doc_id, meta, chunk_dicts)
 
     if result.passed:
         staging.approve(doc_id)
@@ -241,9 +254,8 @@ def ingest_document(
         )
     else:
         logger.warning(
-            "Flagged for review: '%s' (score=%.2f). "
-            "Run 'review list' to inspect.",
-            citation.title, result.score,
+            "Flagged for review: '%s'. Issues: %s",
+            citation.title, " | ".join(result.flags),
         )
 
     # 6 — Optional immediate push
@@ -251,16 +263,17 @@ def ingest_document(
         push_result = push_approved(doc_id=doc_id)
         logger.info("Auto-pushed: %s", push_result)
 
-
     return {
-        "doc_id":          doc_id,
-        "title":           citation.title,
-        "quality_score":   round(result.score, 4),
-        "quality_passed":  result.passed,
-        "status":          status,
-        "chunk_count":     len(chunks),
-        "tags":            tags,
-        "flags":           result.flags,
+        "doc_id":           doc_id,
+        "title":            citation.title,
+        "quality_score":    round(result.score, 4),
+        "quality_passed":   result.passed,
+        "status":           status,
+        "chunk_count":      len(chunks),
+        "tags":             tags,
+        "flags":            result.flags,
+        "age_days":         result.age_days,
+        "is_stale":         result.is_stale,
     }
 
 
@@ -400,39 +413,26 @@ def query_vectorstore(
     settings.validate()
     vectors = embedder.embed_texts([question])
     vec = vectors[0]
-    backend = settings.vector_backend
 
-    if backend == "qdrant":
-        from pipeline import qdrant_store
-        results = qdrant_store.search(
-            vec, top_k=top_k,
-            tag_filter=tag_filter,
-            source_type_filter=source_type,
-        )
-        # Qdrant cosine similarity: 1 = identical, already in ~[0,1] for text
-        for r in results:
-            r["normalized_score"] = round(max(0.0, float(r.get("score", 0))), 4)
-    else:
-        # Redis cosine distance: 0 = identical, ~[0,2] range
-        from pipeline import redis_store
-        redis_tag_filter = None
-        if tag_filter:
-            redis_tag_filter = "@tags:{" + "|".join(tag_filter) + "}"
-        results = redis_store.search(vec, top_k=top_k, tag_filter=redis_tag_filter)
-        for r in results:
-            raw = float(r.get("score", 1.0))
-            r["normalized_score"] = round(max(0.0, min(1.0, 1.0 - raw)), 4)
-            # Normalise tags from Redis string → list
-            tags_raw = r.get("tags", "")
-            if isinstance(tags_raw, str):
-                r["tags"] = [t.strip() for t in tags_raw.split(",") if t.strip()]
-            # Qdrant-style citation stub so UI code is uniform
-            if "citation" not in r:
-                r["citation"] = {
-                    "source_path": r.get("source", ""),
-                    "source_type": "",
-                    "title": r.get("title", ""),
-                }
+    # Redis cosine distance: 0 = identical, ~[0,2] range
+    from pipeline import redis_store
+    redis_tag_filter = None
+    if tag_filter:
+        redis_tag_filter = "@tags:{" + "|".join(tag_filter) + "}"
+    results = redis_store.search(vec, top_k=top_k, tag_filter=redis_tag_filter)
+    for r in results:
+        raw = float(r.get("score", 1.0))
+        r["normalized_score"] = round(max(0.0, min(1.0, 1.0 - raw)), 4)
+        # Normalise tags from Redis string → list
+        tags_raw = r.get("tags", "")
+        if isinstance(tags_raw, str):
+            r["tags"] = [t.strip() for t in tags_raw.split(",") if t.strip()]
+        if "citation" not in r:
+            r["citation"] = {
+                "source_path": r.get("source", ""),
+                "source_type": "",
+                "title": r.get("title", ""),
+            }
 
     return results
 

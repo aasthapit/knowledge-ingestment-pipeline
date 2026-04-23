@@ -18,13 +18,11 @@ def _check_redis() -> tuple[bool, str]:
         return False, str(exc)
 
 
-def _check_qdrant() -> tuple[bool, str]:
-    if settings.vector_backend != "qdrant":
-        return None, "Not the active backend"
+def _check_mongo() -> tuple[bool, str]:
     try:
-        from pipeline import qdrant_store
-        count = qdrant_store.count()
-        return True, f"{settings.qdrant_url}  ({count:,} vectors)"
+        from pipeline.mongo_store import get_staging
+        get_staging().list_all()
+        return True, settings.mongodb_uri or f"{settings.mongodb_host}:{settings.mongodb_port}"
     except Exception as exc:
         return False, str(exc)
 
@@ -34,7 +32,6 @@ def _check_openai() -> tuple[bool, str]:
         return None, f"Using {settings.embedding_provider}"
     if not settings.openai_api_key:
         return False, "OPENAI_API_KEY not set"
-    # Don't make a live API call — just confirm key is present
     masked = settings.openai_api_key[:7] + "…" + settings.openai_api_key[-4:]
     return True, f"Key configured ({masked})"
 
@@ -43,7 +40,7 @@ st.subheader("Service Connections")
 svc_cols = st.columns(3)
 
 redis_ok, redis_msg = _check_redis()
-qdrant_ok, qdrant_msg = _check_qdrant()
+mongo_ok, mongo_msg = _check_mongo()
 openai_ok, openai_msg = _check_openai()
 
 with svc_cols[0]:
@@ -58,16 +55,13 @@ with svc_cols[0]:
 
 with svc_cols[1]:
     with st.container(border=True):
-        if qdrant_ok is None:
-            st.markdown("⚪  **Qdrant**")
-            st.caption(qdrant_msg)
-        elif qdrant_ok:
-            st.markdown("🟢  **Qdrant**")
-            st.caption(qdrant_msg)
+        if mongo_ok:
+            st.markdown("🟢  **MongoDB**")
         else:
-            st.markdown("🔴  **Qdrant**")
-            st.caption(qdrant_msg)
-            st.caption("Start Qdrant: `docker run -p 6333:6333 qdrant/qdrant`")
+            st.markdown("🔴  **MongoDB**")
+        st.caption(mongo_msg)
+        if not mongo_ok:
+            st.caption("Set `MONGODB_URI` in your `.env` file.")
 
 with svc_cols[2]:
     with st.container(border=True):
@@ -85,13 +79,9 @@ st.subheader("Knowledge Base Stats")
 
 stat_cols = st.columns(4)
 
-# Vector store count
 vector_count = 0
 try:
-    if settings.vector_backend == "qdrant":
-        from pipeline import qdrant_store
-        vector_count = qdrant_store.count()
-    elif redis_ok:
+    if redis_ok:
         from pipeline import redis_store
         client = redis_store.get_client()
         try:
@@ -102,16 +92,14 @@ try:
 except Exception:
     pass
 
-# Staging stats
 pending = approved = rejected = total_staged = 0
 try:
-    from pipeline import redis_store
-    staging = redis_store.get_staging()
-    docs = staging.list_all()
-    pending       = sum(1 for d in docs if d.get("status") == "pending_review")
-    approved      = sum(1 for d in docs if d.get("status") == "approved")
-    rejected      = sum(1 for d in docs if d.get("status") == "rejected")
-    total_staged  = len(docs)
+    from pipeline.mongo_store import get_staging
+    docs = get_staging().list_all()
+    pending      = sum(1 for d in docs if d.get("status") == "pending_review")
+    approved     = sum(1 for d in docs if d.get("status") == "approved")
+    rejected     = sum(1 for d in docs if d.get("status") == "rejected")
+    total_staged = len(docs)
 except Exception:
     pass
 
@@ -129,10 +117,9 @@ cfg_left, cfg_right = st.columns(2)
 with cfg_left:
     st.markdown("**Pipeline**")
     cfg_rows = [
-        ("Vector backend",      settings.vector_backend.upper()),
-        ("Quality threshold",   f"{settings.quality_threshold:.0%}"),
         ("Chunk size (tokens)", str(settings.docling_max_tokens)),
         ("Chunk size (chars)",  str(settings.chunk_max_chars)),
+        ("Chunk overlap (chars)", str(settings.chunk_overlap_chars)),
     ]
     for label, value in cfg_rows:
         r1, r2 = st.columns([2, 3])

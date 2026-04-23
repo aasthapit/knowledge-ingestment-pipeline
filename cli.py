@@ -124,18 +124,10 @@ def ingest_jsonl_cmd(path: str, tags: tuple[str, ...], name: str | None) -> None
     default=False,
     help="Immediately embed and push if quality passes (skip manual review step).",
 )
-@click.option(
-    "--quality-threshold",
-    "-q",
-    default=None,
-    type=float,
-    help="Override quality threshold for this document (0.0–1.0).",
-)
 def ingest_doc_cmd(
     source: str,
     tags: tuple[str, ...],
     auto_push: bool,
-    quality_threshold: float | None,
 ) -> None:
     """
     Ingest any document — PDF, DOCX, PPTX, HTML, URL, or Markdown.
@@ -148,7 +140,6 @@ def ingest_doc_cmd(
     result = ingest_document(
         source=source,
         extra_tags=list(tags),
-        quality_threshold=quality_threshold,
         auto_push=auto_push,
     )
 
@@ -393,8 +384,7 @@ def review_push_cmd(doc_id: str | None, remove_staging: bool) -> None:
     _console.print(
         f"[bold green]Done.[/] "
         f"{result['pushed_docs']} doc(s), "
-        f"{result['pushed_chunks']} chunk(s) pushed to "
-        f"[bold]{__import__('pipeline.config', fromlist=['settings']).settings.vector_backend}[/]."
+        f"{result['pushed_chunks']} chunk(s) pushed to Redis."
     )
 
 

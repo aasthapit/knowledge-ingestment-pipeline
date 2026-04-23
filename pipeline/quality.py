@@ -1,27 +1,171 @@
 """
 quality.py
-Assesses whether an ingested document is well-structured enough for
-automatic chunking and auto-tagging, or should be queued for human review.
+Assesses document and chunk quality based on content signals and recency.
 
-Scoring is derived entirely from the markdown export produced by Docling,
-so it works for every supported format without extra ML calls.
+Replaces the old structural heading-count scorer. The new model evaluates:
+  - Per-chunk size (too short / too long)
+  - Per-chunk boilerplate detection (nav menus, TOC, login prompts, etc.)
+  - Document-level recency (from creation date or file mtime)
+
+Quality score = fraction of chunks that have no flags (0.0 – 1.0).
+A document passes (auto-approves) only when it has zero flagged chunks
+and is not stale. Any flag routes it to human review.
 """
 from __future__ import annotations
 
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from pipeline.converter import ConvertedDocument
-
-from pipeline.config import settings
+    from pipeline.chunker import Chunk
+    from pipeline.converter import Citation
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Stop-word list for tag extraction
+# Thresholds (can be overridden via config if needed later)
+# ---------------------------------------------------------------------------
+
+MIN_CHUNK_CHARS    = 100    # fewer chars → "too_short"
+MAX_CHUNK_CHARS    = 2000   # more chars  → "too_long" (embedding model risk)
+STALE_THRESHOLD_DAYS = 180  # 6 months
+
+# ---------------------------------------------------------------------------
+# Boilerplate patterns
+# ---------------------------------------------------------------------------
+
+_BOILERPLATE_PHRASES: frozenset[str] = frozenset({
+    "log in", "sign in", "sign up", "login", "sign out", "log out",
+    "table of contents", "on this page", "in this section", "contents",
+    "copyright", "all rights reserved", "privacy policy",
+    "terms of service", "terms and conditions", "cookie policy",
+    "back to top", "return to top", "top of page",
+    "click here", "read more", "learn more", "see also",
+    "page restrictions", "this page is restricted",
+    "no content found", "this space has no content",
+    "skip to main content", "skip to content",
+    "breadcrumb", "you are here",
+})
+
+_BOILERPLATE_RE = re.compile(
+    r"(?i)(?:"
+    r"^\s*(log\s*in|sign\s*in|sign\s*up|register)\s*$"
+    r"|copyright\s+\(?(?:19|20)\d{2}"
+    r"|all\s+rights\s+reserved"
+    r"|powered\s+by\s+atlassian"
+    r"|atlassian\s+confluence"
+    r")",
+    re.MULTILINE,
+)
+
+
+def _is_boilerplate(text: str) -> bool:
+    """
+    Return True if the chunk content appears to be navigation, TOC, or
+    template boilerplate rather than substantive knowledge content.
+
+    Conservative — only flags obvious cases to avoid false positives
+    on legitimate technical content.
+    """
+    stripped = text.strip()
+
+    # Skip code blocks — many short lines are normal in code
+    if "```" in stripped or stripped.count("    ") > stripped.count("\n") * 0.5:
+        return False
+
+    lower = stripped.lower()
+
+    # Regex patterns (copyright notices, Atlassian footers, login prompts)
+    if _BOILERPLATE_RE.search(stripped):
+        return True
+
+    # Known boilerplate phrases that dominate short content
+    for phrase in _BOILERPLATE_PHRASES:
+        if phrase in lower and len(stripped) < 300:
+            return True
+
+    # Navigation-style content: ≥8 non-empty lines all very short (avg < 30 chars)
+    # Catches exported sidebar menus, breadcrumb lists, TOC entries
+    lines = [l.strip() for l in stripped.splitlines() if l.strip()]
+    if len(lines) >= 8:
+        avg_len = sum(len(l) for l in lines) / len(lines)
+        if avg_len < 30:
+            return True
+
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Recency
+# ---------------------------------------------------------------------------
+
+_DATE_FORMATS = (
+    "%Y-%m-%dT%H:%M:%S.%fZ",
+    "%Y-%m-%dT%H:%M:%SZ",
+    "%Y-%m-%dT%H:%M:%S",
+    "%Y-%m-%d",
+)
+
+
+def _compute_age_days(
+    date_str: str | None,
+    source_path: str | None = None,
+) -> int | None:
+    """
+    Return age in whole days from a date string (ISO 8601) or file mtime.
+    Returns None if neither is available or parseable.
+    """
+    now = datetime.now(timezone.utc)
+
+    if date_str:
+        # Strip trailing Z / timezone for strptime, then re-attach UTC
+        clean = date_str.strip().rstrip("Z").split("+")[0][:26]
+        for fmt in _DATE_FORMATS:
+            try:
+                dt = datetime.strptime(clean, fmt).replace(tzinfo=timezone.utc)
+                return max(0, (now - dt).days)
+            except (ValueError, TypeError):
+                continue
+
+    if source_path:
+        try:
+            p = Path(source_path)
+            if p.exists():
+                mtime = p.stat().st_mtime
+                dt = datetime.fromtimestamp(mtime, tz=timezone.utc)
+                return max(0, (now - dt).days)
+        except Exception:
+            pass
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Data model
+# ---------------------------------------------------------------------------
+
+@dataclass
+class QualityResult:
+    """Result of a document quality assessment under the new model."""
+    score: float                               # fraction of clean chunks (0–1)
+    passed: bool                               # True when score == 1.0 and not stale
+    flags: list[str] = field(default_factory=list)        # document-level human-readable issues
+    chunk_flags: dict[int, list[str]] = field(default_factory=dict)  # {chunk_idx: [flag_names]}
+    age_days: int | None = None                # None if date unknown
+    is_stale: bool = False                     # age_days > STALE_THRESHOLD_DAYS
+    chunks_too_short: int = 0
+    chunks_too_long: int = 0
+    chunks_boilerplate: int = 0
+    suggested_tags: list[str] = field(default_factory=list)
+    signals: dict[str, Any] = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Tag extraction (kept — still useful for auto-tagging)
 # ---------------------------------------------------------------------------
 
 _STOP_WORDS = frozenset(
@@ -32,143 +176,18 @@ _STOP_WORDS = frozenset(
     "five six seven eight nine ten about into over after before between".split()
 )
 
-# ---------------------------------------------------------------------------
-# Data model
-# ---------------------------------------------------------------------------
 
-@dataclass
-class QualityResult:
-    score: float                              # 0.0 – 1.0
-    passed: bool                              # score >= settings.quality_threshold
-    signals: dict[str, float]                 # individual weighted component scores
-    flags: list[str] = field(default_factory=list)         # human-readable issues
-    suggested_tags: list[str] = field(default_factory=list)
-
-
-# ---------------------------------------------------------------------------
-# Signal extraction (from markdown — always available after Docling conversion)
-# ---------------------------------------------------------------------------
-
-def _extract_signals(markdown: str) -> dict:
-    """Extract raw structural signals from a markdown string."""
-    heading_re = re.compile(r"^(#{1,6})\s+(.*)", re.MULTILINE)
-    headings = heading_re.findall(markdown)
-
-    heading_count = len(headings)
-    heading_levels = {len(h) for h, _ in headings}
-    has_title = any(len(h) == 1 for h, _ in headings)
-
-    # Body text: everything that isn't a heading line
-    body = heading_re.sub("", markdown)
-    # Split into non-empty paragraphs
-    paragraphs = [p.strip() for p in re.split(r"\n{2,}", body) if p.strip()]
-    total_body_chars = sum(len(p) for p in paragraphs)
-    avg_section_len = total_body_chars / max(heading_count, 1)
-
-    # YAML / TOML front-matter → metadata present
-    has_frontmatter = bool(re.match(r"^---\s*\n.*?\n---\s*\n", markdown, re.DOTALL))
-
-    # Short empty-looking sections (< 60 chars) as a fraction of heading count
-    short_sections = sum(1 for p in paragraphs if len(p) < 60)
-    short_fraction = short_sections / max(len(paragraphs), 1)
-
-    return {
-        "has_title": has_title,
-        "heading_count": heading_count,
-        "heading_levels": heading_levels,
-        "avg_section_len": avg_section_len,
-        "total_body_chars": total_body_chars,
-        "short_fraction": short_fraction,
-        "has_frontmatter": has_frontmatter,
-        "paragraphs": paragraphs,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Scoring
-# ---------------------------------------------------------------------------
-
-def _score(signals: dict) -> tuple[float, list[str], dict[str, float]]:
-    """Map raw signals to a weighted quality score + flag list."""
-    flags: list[str] = []
-    components: dict[str, float] = {}
-
-    # 1. Has a title (H1) — weight 0.25
-    if signals["has_title"]:
-        components["has_title"] = 1.0
-    else:
-        components["has_title"] = 0.0
-        flags.append("No H1 title found — document identity is unclear.")
-
-    # 2. Has multiple headings — weight 0.25
-    hc = signals["heading_count"]
-    if hc >= 4:
-        components["has_headings"] = 1.0
-    elif hc >= 2:
-        components["has_headings"] = 0.6
-    elif hc == 1:
-        components["has_headings"] = 0.3
-        flags.append("Only 1 heading — document may be a flat text block.")
-    else:
-        components["has_headings"] = 0.0
-        flags.append("No headings found — document has no navigable structure.")
-
-    # 3. Heading hierarchy depth — weight 0.15
-    levels = signals["heading_levels"]
-    if len(levels) >= 2:
-        components["heading_depth"] = 1.0
-    elif len(levels) == 1:
-        components["heading_depth"] = 0.5
-        flags.append("Only one heading level used — shallow hierarchy.")
-    else:
-        components["heading_depth"] = 0.0
-
-    # 4. Section richness (average body chars per heading) — weight 0.20
-    avg = signals["avg_section_len"]
-    sf = signals["short_fraction"]
-    if avg >= 300 and sf < 0.3:
-        components["section_richness"] = 1.0
-    elif avg >= 100:
-        components["section_richness"] = 0.65
-    elif avg >= 40:
-        components["section_richness"] = 0.35
-        flags.append(
-            f"Sections are sparse (avg {avg:.0f} chars) — "
-            "may be a table of contents or fragmented content."
-        )
-    else:
-        components["section_richness"] = 0.0
-        flags.append("Almost no body text found — document may be image-only or empty.")
-
-    # 5. Metadata / front-matter present — weight 0.15
-    if signals["has_frontmatter"]:
-        components["has_metadata"] = 1.0
-    else:
-        components["has_metadata"] = 0.2
-        flags.append("No YAML front-matter found — tags and metadata will be auto-suggested.")
-
-    weights = {
-        "has_title":       0.25,
-        "has_headings":    0.25,
-        "heading_depth":   0.15,
-        "section_richness": 0.20,
-        "has_metadata":    0.15,
-    }
-    score = sum(weights[k] * components[k] for k in weights)
-    return score, flags, components
-
-
-# ---------------------------------------------------------------------------
-# Auto-tag extraction
-# ---------------------------------------------------------------------------
-
-def extract_tags(markdown: str, title: str = "", extra: list[str] | None = None) -> list[str]:
+def extract_tags(
+    markdown: str,
+    title: str = "",
+    extra: list[str] | None = None,
+) -> list[str]:
     """
-    Derive up to 10 lowercase keyword tags from the document's headings and title.
-    Does not call any external service.
+    Derive up to 10 lowercase keyword tags from headings and title.
+    No external service calls.
     """
     heading_re = re.compile(r"^#{1,3}\s+(.*)", re.MULTILINE)
-    heading_texts = heading_re.findall(markdown)[:8]  # top 8 headings
+    heading_texts = heading_re.findall(markdown)[:8]
 
     seen: set[str] = set()
     tags: list[str] = []
@@ -176,7 +195,11 @@ def extract_tags(markdown: str, title: str = "", extra: list[str] | None = None)
     for text in ([title] if title else []) + heading_texts:
         for token in re.split(r"[\s\-_/\\,.;:()\[\]{}|]+", text):
             word = token.lower().strip("'\"`")
-            if len(word) >= 3 and word not in _STOP_WORDS and re.fullmatch(r"[a-z0-9]+", word):
+            if (
+                len(word) >= 3
+                and word not in _STOP_WORDS
+                and re.fullmatch(r"[a-z0-9]+", word)
+            ):
                 if word not in seen:
                     seen.add(word)
                     tags.append(word)
@@ -185,8 +208,7 @@ def extract_tags(markdown: str, title: str = "", extra: list[str] | None = None)
         if len(tags) >= 10:
             break
 
-    # Merge explicit extras (deduplicated)
-    for t in (extra or []):
+    for t in extra or []:
         t = t.lower().strip()
         if t and t not in seen:
             seen.add(t)
@@ -196,42 +218,109 @@ def extract_tags(markdown: str, title: str = "", extra: list[str] | None = None)
 
 
 # ---------------------------------------------------------------------------
-# Public API
+# Core assessment
 # ---------------------------------------------------------------------------
 
-def assess_quality(converted_doc: "ConvertedDocument") -> QualityResult:
+def assess_document(
+    chunks: "list[Chunk]",
+    citation: "Citation",
+) -> QualityResult:
     """
-    Assess the structural quality of a converted document.
+    Assess document quality from its chunks and citation metadata.
 
-    Operates on the markdown export (always available after Docling
-    conversion) so it requires no additional ML inference.
+    Called AFTER chunking so signals are based on the actual content
+    units that will be embedded and retrieved, not on document structure.
 
-    Returns a :class:`QualityResult` with score, pass/fail flag,
-    per-component scores, human-readable flags, and suggested tags.
+    Parameters
+    ----------
+    chunks:
+        List of Chunk objects produced by the chunker.
+    citation:
+        Source metadata (title, created_date, source_path, etc.).
+
+    Returns
+    -------
+    QualityResult
+        score = fraction of clean chunks.
+        passed = True only when all chunks are clean AND content is not stale.
     """
-    markdown = converted_doc.markdown
-    title = converted_doc.citation.title
+    flags: list[str] = []
+    chunk_flags: dict[int, list[str]] = {}
+    n_too_short = n_too_long = n_boilerplate = 0
 
-    signals = _extract_signals(markdown)
-    score, flags, components = _score(signals)
+    for i, chunk in enumerate(chunks):
+        content = chunk.content if hasattr(chunk, "content") else chunk.get("content", "")
+        issues: list[str] = []
 
-    threshold = settings.quality_threshold
-    passed = score >= threshold
+        char_count = len(content.strip())
 
-    if passed:
-        logger.info("Quality PASS (%.2f >= %.2f): %s", score, threshold, title)
-    else:
-        logger.warning(
-            "Quality FAIL (%.2f < %.2f): %s\n  Flags: %s",
-            score, threshold, title, " | ".join(flags),
+        if char_count < MIN_CHUNK_CHARS:
+            issues.append("too_short")
+            n_too_short += 1
+        elif char_count > MAX_CHUNK_CHARS:
+            issues.append("too_long")
+            n_too_long += 1
+
+        if _is_boilerplate(content):
+            issues.append("boilerplate")
+            n_boilerplate += 1
+
+        if issues:
+            chunk_flags[i] = issues
+
+    total = len(chunks)
+
+    if n_too_short:
+        flags.append(
+            f"{n_too_short} chunk(s) are too short (< {MIN_CHUNK_CHARS} chars) "
+            "— may be section stubs, nav elements, or empty headings."
+        )
+    if n_too_long:
+        flags.append(
+            f"{n_too_long} chunk(s) exceed {MAX_CHUNK_CHARS} chars "
+            "— risk truncation by the embedding model."
+        )
+    if n_boilerplate:
+        flags.append(
+            f"{n_boilerplate} chunk(s) appear to be boilerplate "
+            "— navigation menus, table of contents, or template text."
         )
 
-    suggested_tags = extract_tags(markdown, title=title)
+    # Recency
+    date_str    = getattr(citation, "created_date", None)
+    source_path = getattr(citation, "source_path", None)
+    age_days    = _compute_age_days(date_str, source_path)
+    is_stale    = age_days is not None and age_days > STALE_THRESHOLD_DAYS
+
+    if is_stale:
+        age_str = f"{age_days} days" if age_days is not None else "unknown age"
+        flags.append(
+            f"Content is {age_str} old — consider refreshing from the source."
+        )
+
+    # Score and pass/fail
+    n_flagged = len(chunk_flags)
+    score = round(1.0 - (n_flagged / max(total, 1)), 4)
+    passed = (len(flags) == 0)
+
+    # Auto-tags from headings + title
+    suggested_tags = extract_tags("", title=getattr(citation, "title", ""))
 
     return QualityResult(
-        score=round(score, 4),
+        score=score,
         passed=passed,
-        signals=components,
         flags=flags,
+        chunk_flags=chunk_flags,
+        age_days=age_days,
+        is_stale=is_stale,
+        chunks_too_short=n_too_short,
+        chunks_too_long=n_too_long,
+        chunks_boilerplate=n_boilerplate,
         suggested_tags=suggested_tags,
+        signals={
+            "total_chunks":   total,
+            "flagged_chunks": n_flagged,
+            "clean_chunks":   total - n_flagged,
+            "age_days":       age_days,
+        },
     )

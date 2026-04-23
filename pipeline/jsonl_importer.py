@@ -581,6 +581,14 @@ def import_jsonl(
                 "Pass them as parameters or ensure every record contains these fields."
             )
 
+    # Quality signal accumulators (filled during the stream loop below)
+    from pipeline.quality import (
+        _compute_age_days, _is_boilerplate,
+        MIN_CHUNK_CHARS, MAX_CHUNK_CHARS, STALE_THRESHOLD_DAYS,
+    )
+    n_too_short = n_too_long = n_boilerplate = 0
+    record_dates: list[str] = []
+
     # Stream + map
     def _line_iter():
         if isinstance(source, (str, Path)):
@@ -630,7 +638,36 @@ def import_jsonl(
         else:
             has_all_embeddings = False
 
-        chunks_dicts.append(chunk.to_dict())
+        d = chunk.to_dict()
+
+        # Per-chunk quality signals
+        content = chunk.content.strip()
+        char_count = len(content)
+        q_issues: list[str] = []
+        if char_count < MIN_CHUNK_CHARS:
+            q_issues.append("too_short")
+            n_too_short += 1
+        elif char_count > MAX_CHUNK_CHARS:
+            q_issues.append("too_long")
+            n_too_long += 1
+        if _is_boilerplate(content):
+            q_issues.append("boilerplate")
+            n_boilerplate += 1
+        if q_issues:
+            d.setdefault("metadata", {})["quality_flags"] = q_issues
+
+        chunks_dicts.append(d)
+
+        # Collect date for recency check (try multiple field paths)
+        date_val = (
+            _resolve_field(rec, "metadata.citation.created_date")
+            or _resolve_field(rec, "metadata.confluence.last_modified")
+            or rec.get("created_date")
+            or rec.get("last_modified")
+        )
+        if date_val and isinstance(date_val, str):
+            record_dates.append(date_val)
+
         total += 1
 
         if progress_cb and total % 1000 == 0:
@@ -642,6 +679,44 @@ def import_jsonl(
     # Stage as a single batch
     doc_id = str(uuid.uuid5(uuid.NAMESPACE_URL, batch_name + str(total)))
 
+    # Compute recency from collected record dates (use average age)
+    age_days: int | None = None
+    is_stale = False
+    if record_dates:
+        ages = [_compute_age_days(d) for d in record_dates]
+        valid_ages = [a for a in ages if a is not None]
+        if valid_ages:
+            age_days = int(sum(valid_ages) / len(valid_ages))
+            is_stale = age_days > STALE_THRESHOLD_DAYS
+
+    # Build quality flags list and score
+    import json as _json
+    quality_flags: list[str] = []
+    if n_too_short:
+        quality_flags.append(
+            f"{n_too_short} chunk(s) are too short (< {MIN_CHUNK_CHARS} chars) "
+            "— may be section stubs or nav elements."
+        )
+    if n_too_long:
+        quality_flags.append(
+            f"{n_too_long} chunk(s) exceed {MAX_CHUNK_CHARS} chars "
+            "— risk truncation by the embedding model."
+        )
+    if n_boilerplate:
+        quality_flags.append(
+            f"{n_boilerplate} chunk(s) appear to be boilerplate "
+            "— navigation menus, table of contents, or template text."
+        )
+    if is_stale:
+        quality_flags.append(
+            f"Content is ~{age_days} days old — consider refreshing from the source."
+        )
+
+    n_flagged_chunks = sum(1 for cd in chunks_dicts if cd.get("metadata", {}).get("quality_flags"))
+    quality_score = round(1.0 - (n_flagged_chunks / max(total, 1)), 4)
+    quality_passed = len(quality_flags) == 0
+    status = "approved" if quality_passed else "pending_review"
+
     meta: dict[str, Any] = {
         "title":                  f"JSONL import — {batch_name}",
         "source_path":            batch_name,
@@ -651,13 +726,18 @@ def import_jsonl(
         "unique_sources":         len(unique_sources),
         "has_embeddings":         int(has_all_embeddings),
         "has_partial_embeddings": int(has_any_embedding and not has_all_embeddings),
-        "quality_score":          1.0,
-        "quality_passed":         1,
-        "quality_flags":          "[]",
-        "status":                 "approved",
+        "quality_score":          quality_score,
+        "quality_passed":         int(quality_passed),
+        "quality_flags":          _json.dumps(quality_flags),
+        "status":                 status,
         "kb_name":                kb_name,
         "usecase_id":             resolved_usecase_id or None,
         "agent_filter":           resolved_agent_filter or None,
+        "age_days":               age_days,
+        "is_stale":               is_stale,
+        "chunks_too_short":       n_too_short,
+        "chunks_too_long":        n_too_long,
+        "chunks_boilerplate":     n_boilerplate,
     }
 
     # If all embeddings are pre-computed, attach them into the chunk dicts
@@ -669,7 +749,8 @@ def import_jsonl(
 
     staging = mongo_store.get_staging()
     staging.enqueue(doc_id, meta, chunks_dicts)
-    staging.approve(doc_id)
+    if quality_passed:
+        staging.approve(doc_id)
 
     logger.info(
         "Staged JSONL batch '%s': %d chunks, %d unique sources, schema=%s, embeddings=%s",

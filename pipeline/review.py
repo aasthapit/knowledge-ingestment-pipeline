@@ -262,17 +262,11 @@ def push_approved(
                 qs_value = float(doc_meta.get("quality_score", 1.0))
             except (ValueError, TypeError):
                 qs_value = 1.0
-            quality_scores = {c.chunk_id: qs_value for c in chunks}
 
-            # Push to configured backend
-            backend = settings.vector_backend
-            if backend == "qdrant":
-                from pipeline import qdrant_store
-                qdrant_store.upsert_chunks(chunks, vectors, quality_scores=quality_scores)
-            else:  # redis (default)
-                from pipeline import redis_store
-                redis_store.create_index()
-                redis_store.upsert_chunks(chunks, vectors)
+            # Push to Redis
+            from pipeline import redis_store
+            redis_store.create_index()
+            redis_store.upsert_chunks(chunks, vectors)
 
             pushed_docs += 1
             pushed_chunks += len(chunks)

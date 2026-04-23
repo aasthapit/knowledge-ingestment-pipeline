@@ -25,9 +25,14 @@ def _badge(status: str) -> str:
     return f"{icon} {label}"
 
 
-def _score_bar(score: float) -> str:
-    filled = round(score * 10)
-    return "█" * filled + "░" * (10 - filled)
+def _age_label(age_days: int | None) -> str:
+    if age_days is None:
+        return "age unknown"
+    if age_days < 30:
+        return f"{age_days}d old"
+    if age_days < 365:
+        return f"{age_days // 30}mo old"
+    return f"{age_days // 365}y old"
 
 
 def _safe_int(v, default=0) -> int:
@@ -139,16 +144,23 @@ if not visible_docs:
 
 # ── Document cards ────────────────────────────────────────────────────────────
 for doc in visible_docs:
-    doc_id   = doc.get("doc_id", "")
-    title    = doc.get("title", "Untitled")
-    status   = doc.get("status", "")
-    score    = _safe_float(doc.get("quality_score", 0))
-    chunks   = _safe_int(doc.get("chunk_count", 0))
-    src_type = doc.get("source_type", "")
-    flags    = doc.get("quality_flags") or []
-    author   = doc.get("author", "")
-    pages    = doc.get("page_count", "")
-    url      = doc.get("url", "")
+    doc_id      = doc.get("doc_id", "")
+    title       = doc.get("title", "Untitled")
+    status      = doc.get("status", "")
+    score       = _safe_float(doc.get("quality_score", 0))
+    chunks      = _safe_int(doc.get("chunk_count", 0))
+    src_type    = doc.get("source_type", "")
+    flags       = doc.get("quality_flags") or []
+    author      = doc.get("author", "")
+    pages       = doc.get("page_count", "")
+    url         = doc.get("url", "")
+    usecase_id  = doc.get("usecase_id") or ""
+    agent_flt   = doc.get("agent_filter") or ""
+    age_days    = doc.get("age_days")
+    is_stale    = doc.get("is_stale", False)
+    n_short     = _safe_int(doc.get("chunks_too_short", 0))
+    n_long      = _safe_int(doc.get("chunks_too_long", 0))
+    n_bplate    = _safe_int(doc.get("chunks_boilerplate", 0))
 
     src_icon = SOURCE_ICON.get(src_type, "📎")
 
@@ -163,6 +175,10 @@ for doc in visible_docs:
             if pages:
                 meta_parts.append(f"{pages} pages")
             meta_parts.append(f"{chunks} sections")
+            if usecase_id:
+                meta_parts.append(f"🗂️ {usecase_id}")
+            if agent_flt:
+                meta_parts.append(f"🤖 {agent_flt}")
             st.caption("  ·  ".join(p for p in meta_parts if p))
         with s_col:
             color = STATUS_COLOR.get(status, "gray")
@@ -171,10 +187,29 @@ for doc in visible_docs:
                 unsafe_allow_html=True,
             )
 
-        # ── Row 2: quality bar ────────────────────────────────────────────
-        q_col, _ = st.columns([2, 3])
+        # ── Row 2: quality signals ────────────────────────────────────────
+        sig_parts: list[str] = []
+        if chunks:
+            clean = chunks - (n_short + n_long + n_bplate)
+            sig_parts.append(f"✅ {clean} clean")
+        if n_short:
+            sig_parts.append(f"⬇️ {n_short} too short")
+        if n_long:
+            sig_parts.append(f"⬆️ {n_long} too long")
+        if n_bplate:
+            sig_parts.append(f"📋 {n_bplate} boilerplate")
+
+        age_label = _age_label(age_days)
+        age_badge = f"🕐 {age_label}"
+        if is_stale:
+            age_badge = f"⚠️ {age_label} — stale"
+
+        q_col, age_col = st.columns([3, 2])
         with q_col:
-            st.progress(score, text=f"Quality  {_score_bar(score)}  {score:.0%}")
+            if sig_parts:
+                st.caption("  ·  ".join(sig_parts))
+        with age_col:
+            st.caption(age_badge)
 
         # ── Row 3: flags (if any) ─────────────────────────────────────────
         if flags:

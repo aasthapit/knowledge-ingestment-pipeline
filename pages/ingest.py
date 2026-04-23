@@ -20,21 +20,6 @@ TYPE_LABELS = {
 }
 
 
-def _score_bar(score: float) -> str:
-    """Emoji progress bar for quality score."""
-    filled = round(score * 10)
-    return "█" * filled + "░" * (10 - filled)
-
-
-def _relevance_label(score: float) -> tuple[str, str]:
-    """(emoji, label) for quality score."""
-    if score >= 0.80:
-        return "✅", "Excellent"
-    if score >= 0.60:
-        return "🟡", "Good"
-    if score >= 0.40:
-        return "🟠", "Fair — review recommended"
-    return "🔴", "Poor — review required"
 
 
 # ── Page ─────────────────────────────────────────────────────────────────────
@@ -348,22 +333,31 @@ tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
 if tags:
     st.caption("Will be tagged: " + "  ".join(f"`{t}`" for t in tags))
 
+uc_col1, uc_col2 = st.columns(2)
+with uc_col1:
+    doc_usecase_id = st.text_input(
+        "Use case ID  *(optional)*",
+        placeholder="GENAI1597_SSOP",
+        help="Business use-case identifier. Used to track which knowledge base this document belongs to.",
+        key="doc_usecase_id",
+    )
+with uc_col2:
+    doc_agent_filter = st.text_input(
+        "Agent filter  *(optional)*",
+        placeholder="ssop_cloud_operations_knowledge_agent",
+        help="Target agent or persona this document is intended for.",
+        key="doc_agent_filter",
+    )
+
 # ── Advanced ──────────────────────────────────────────────────────────────────
 with st.expander("⚙️  Advanced options"):
-    quality_threshold = st.slider(
-        "Quality threshold",
-        min_value=0.0, max_value=1.0, value=0.6, step=0.05,
-        help=(
-            "Documents scoring below this are sent for manual review instead of "
-            "being auto-approved. Lower = more permissive, higher = stricter."
-        ),
-    )
     auto_push = st.toggle(
-        "Push directly to knowledge base if quality is good enough",
+        "Push directly to knowledge base if all quality checks pass",
         value=False,
         help=(
-            "If on, high-quality documents skip the review step and become "
-            "searchable immediately. If off, you approve them in the Review Queue."
+            "If on, documents with no quality flags skip the review step and "
+            "become searchable immediately. Documents with flagged chunks (too short, "
+            "too long, boilerplate, or stale) always go to the Review Queue."
         ),
     )
 
@@ -397,9 +391,10 @@ if st.button(
             result = ingest_document(
                 source=source_arg,
                 extra_tags=tags,
-                quality_threshold=quality_threshold,
                 auto_push=auto_push,
                 kb_name=kb_name.strip() or "default",
+                usecase_id=doc_usecase_id.strip() or None,
+                agent_filter=doc_agent_filter.strip() or None,
             )
 
             if result["quality_passed"]:
@@ -432,7 +427,6 @@ if "last_ingest" in st.session_state:
     result = st.session_state["last_ingest"]
     score  = float(result.get("quality_score", 0))
     passed = result.get("quality_passed", False)
-    emoji, label = _relevance_label(score)
 
     st.divider()
 
@@ -450,16 +444,26 @@ if "last_ingest" in st.session_state:
             )
 
         # Metrics row
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Quality Score", f"{score:.0%}", help="How well-structured this document is")
-        m2.metric("Sections found", result.get("chunk_count", 0), help="Number of logical sections the document was split into")
-        m3.metric("Tags applied", len(result.get("tags", [])))
+        chunk_count = result.get("chunk_count", 0)
+        age_days    = result.get("age_days")
+        is_stale    = result.get("is_stale", False)
 
-        # Quality bar
-        st.markdown(
-            f"**Quality** {emoji} {label}  \n"
-            f"`{_score_bar(score)}`  {score:.0%}"
-        )
+        if age_days is not None:
+            age_label = (
+                f"{age_days}d" if age_days < 30
+                else f"{age_days // 30}mo" if age_days < 365
+                else f"{age_days // 365}y"
+            )
+            age_display = f"⚠️ {age_label} — stale" if is_stale else f"✅ {age_label} old"
+        else:
+            age_display = "age unknown"
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Sections found", chunk_count,
+                  help="Number of logical sections the document was split into")
+        m2.metric("Clean sections", f"{score:.0%}",
+                  help="Fraction of sections with no quality flags")
+        m3.metric("Content age", age_display)
 
         # Tags
         if result.get("tags"):

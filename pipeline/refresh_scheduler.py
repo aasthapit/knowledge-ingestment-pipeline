@@ -34,6 +34,7 @@ def _do_confluence_refresh(
     page_urls: list[str],
     max_depth: int,
     extra_tags: list[str],
+    source_id: str | None = None,
 ) -> None:
     """
     Re-crawl registered Confluence pages for a usecase+agent pair, stage the
@@ -76,6 +77,23 @@ def _do_confluence_refresh(
             "No pages retrieved for usecase=%s agent=%s", usecase_id, agent_filter
         )
         return
+
+    # Store page snapshot for drift tracking (page_id + version per page).
+    if source_id:
+        try:
+            from pipeline.mongo_store import get_usecase_ledger
+            snapshot = [
+                {
+                    "page_id":       p.page_id,
+                    "title":         p.title,
+                    "version":       p.version,
+                    "last_modified": p.last_modified,
+                }
+                for p in all_pages
+            ]
+            get_usecase_ledger().record_crawl_snapshot(source_id, snapshot)
+        except Exception as exc:
+            logger.warning("Could not store page snapshot: %s", exc)
 
     # Convert pages to JSONL bytes using the existing pipeline-schema format.
     # usecase_id and agent_filter are passed as parameters (not embedded in
@@ -141,6 +159,7 @@ def _run_due_refreshes() -> None:
                 page_urls=page_urls,
                 max_depth=max_depth,
                 extra_tags=extra_tags,
+                source_id=source_id,
             )
             uc_ledger.mark_refresh_done(source_id)
             if cron_expr:
@@ -226,6 +245,7 @@ def trigger_refresh_now(usecase_id: str, agent_filter: str) -> None:
             page_urls=page_urls,
             max_depth=max_depth,
             extra_tags=extra_tags,
+            source_id=source_id,
         )
         uc_ledger.mark_refresh_done(source_id)
         if cron_expr:

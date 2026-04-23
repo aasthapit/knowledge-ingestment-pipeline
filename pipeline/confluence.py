@@ -331,6 +331,50 @@ class ConfluenceCrawler:
         logger.info("Crawled %d pages successfully.", len(pages))
         return pages
 
+    def crawl_metadata(
+        self,
+        page_url: str,
+        max_depth: int = -1,
+    ) -> list[dict]:
+        """
+        Metadata-only tree walk — fetches page IDs, titles, versions, and
+        last-modified timestamps without downloading body content.
+
+        Much faster than a full crawl; used for drift checking to see
+        what has changed since the last ingest without re-fetching content.
+
+        Returns
+        -------
+        list[dict]
+            Each dict: ``{page_id, title, version, last_modified}``.
+        """
+        page_id = _extract_page_id(page_url)
+        if not page_id:
+            raise ValueError(
+                f"Could not extract a page ID from: {page_url!r}\n"
+                "Pass a URL containing /pages/12345678/… or a bare numeric ID."
+            )
+
+        visited: set[str] = set()
+        all_ids = [page_id] + list(
+            self._iter_descendants(page_id, depth=1, max_depth=max_depth, visited=visited)
+        )
+
+        result = []
+        for pid in all_ids:
+            try:
+                raw = self._confluence.get_page_by_id(pid, expand="version,space")
+                result.append({
+                    "page_id":       str(raw["id"]),
+                    "title":         raw.get("title", ""),
+                    "version":       raw.get("version", {}).get("number", 1),
+                    "last_modified": raw.get("version", {}).get("when", ""),
+                })
+            except Exception as exc:
+                logger.warning("Could not fetch metadata for page %s: %s", pid, exc)
+
+        return result
+
     # ------------------------------------------------------------------
     # JSONL export
     # ------------------------------------------------------------------
