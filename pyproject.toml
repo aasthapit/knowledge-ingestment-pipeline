@@ -27,6 +27,10 @@ dependencies = [
     "rich>=13.7.0",
     # UI
     "streamlit>=1.40.0",
+    # API server
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "python-multipart>=0.0.9",
     # Document ledger / staging
     "pymongo==4.16.0",
     # Confluence refresh scheduler
