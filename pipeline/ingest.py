@@ -277,6 +277,9 @@ def ingest_jsonl(
     usecase_id: str | None = None,
     agent_filter: str | None = None,
     require_usecase: bool = False,
+    field_map: dict[str, str] | None = None,
+    tags_static: list[str] | None = None,
+    section_join: str = " > ",
 ) -> dict:
     """
     Import a JSONL chunk file into the staging area.
@@ -325,6 +328,9 @@ def ingest_jsonl(
         usecase_id=usecase_id,
         agent_filter=agent_filter,
         require_usecase=require_usecase,
+        field_map=field_map,
+        tags_static=tags_static,
+        section_join=section_join,
     )
 
 

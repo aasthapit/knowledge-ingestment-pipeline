@@ -97,42 +97,38 @@ def _detect_custom(record: dict) -> str | None:
     return None
 
 
-def _map_custom(rec: dict, schema_name: str, extra_tags: list[str]) -> tuple[Chunk, list[float] | None]:
-    """Map a record using a named custom schema definition."""
-    schema_def = next(
-        (s for s in _load_custom_schemas() if s["name"] == schema_name), None
-    )
-    if schema_def is None:
-        raise ValueError(f"Custom schema '{schema_name}' not found in schemas.yaml")
+def _map_with_fieldmap(
+    rec: dict,
+    fields: dict[str, str],
+    extra_tags: list[str],
+    tags_static: list[str],
+    section_join: str,
+) -> tuple[Chunk, list[float] | None]:
+    """
+    Core field-mapping logic used by both named custom schemas (schemas.yaml)
+    and inline field_map dicts supplied at import time.
 
-    fields       = schema_def.get("fields", {})
-    tags_static  = schema_def.get("tags_static") or []
-    section_join = schema_def.get("section_join", " > ")
-
+    ``fields`` maps pipeline field names to dot-notated paths in the source
+    record, e.g. ``{"content": "body.text", "source": "_links.webui"}``.
+    """
     def _get(field: str) -> Any:
         path = fields.get(field)
         return _resolve_field(rec, path) if path else None
 
-    # Content
     content = _get("content") or ""
+    source  = _get("source") or ""
 
-    # Source
-    source = _get("source") or ""
-
-    # Section — join if it's a list
     section_raw = _get("section")
     if isinstance(section_raw, list):
         section = section_join.join(str(s) for s in section_raw if s)
     else:
         section = str(section_raw) if section_raw else ""
 
-    # Tags
     rec_tags = _get("tags") or []
     if isinstance(rec_tags, str):
         rec_tags = [t.strip() for t in rec_tags.split(",") if t.strip()]
     all_tags = list(dict.fromkeys(list(rec_tags) + list(tags_static) + list(extra_tags)))
 
-    # Embedding
     raw_emb = _get("embedding")
     embedding: list[float] | None = raw_emb if isinstance(raw_emb, list) and raw_emb else None
 
@@ -146,6 +142,23 @@ def _map_custom(rec: dict, schema_name: str, extra_tags: list[str]) -> tuple[Chu
         metadata={},
     )
     return chunk, embedding
+
+
+def _map_custom(rec: dict, schema_name: str, extra_tags: list[str]) -> tuple[Chunk, list[float] | None]:
+    """Map a record using a named custom schema definition from schemas.yaml."""
+    schema_def = next(
+        (s for s in _load_custom_schemas() if s["name"] == schema_name), None
+    )
+    if schema_def is None:
+        raise ValueError(f"Custom schema '{schema_name}' not found in schemas.yaml")
+
+    return _map_with_fieldmap(
+        rec,
+        fields=schema_def.get("fields", {}),
+        extra_tags=extra_tags,
+        tags_static=schema_def.get("tags_static") or [],
+        section_join=schema_def.get("section_join", " > "),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -278,22 +291,30 @@ def map_record(
 def peek_jsonl(
     source: str | Path | io.IOBase,
     n: int = 5,
+    field_map: dict[str, str] | None = None,
+    tags_static: list[str] | None = None,
+    section_join: str = " > ",
 ) -> dict[str, Any]:
     """
-    Read the first *n* records of a JSONL file and return a preview dict:
+    Read the first *n* records of a JSONL file and return a preview dict.
 
-    .. code-block:: python
+    When ``field_map`` is supplied the sample chunks are generated using
+    that mapping instead of the auto-detected schema, so the UI can show
+    a live preview of a custom mapping before committing to an import.
 
-        {
-            "schema":          "crawler" | "pipeline" | "unknown",
-            "has_embeddings":  bool,
-            "sample_records":  list[dict],   # first n raw records
-            "sample_chunks":   list[Chunk],  # mapped Chunk objects
-            "unique_sources":  int,          # estimated from first n records
-        }
+    Returns
+    -------
+    dict with keys:
+        schema          – auto-detected schema name
+        has_embeddings  – whether the first record contains an embedding vector
+        sample_records  – first n raw dicts
+        sample_chunks   – mapped Chunk objects (using field_map when supplied)
+        unique_sources  – distinct source values seen in the sample
+        available_keys  – sorted list of all top-level keys across sample records
     """
     samples_raw: list[dict] = []
     sources_seen: set[str] = set()
+    all_keys: set[str] = set()
 
     def _lines():
         if isinstance(source, (str, Path)):
@@ -301,7 +322,6 @@ def peek_jsonl(
                 for line in fh:
                     yield line
         else:
-            # BytesIO / file-like object — seek to start first
             try:
                 source.seek(0)
             except Exception:
@@ -321,6 +341,7 @@ def peek_jsonl(
         try:
             rec = json.loads(line)
             samples_raw.append(rec)
+            all_keys.update(rec.keys())
             src = rec.get("page_url") or rec.get("source") or rec.get("url", "")
             if src:
                 sources_seen.add(src)
@@ -328,14 +349,26 @@ def peek_jsonl(
             continue
 
     if not samples_raw:
-        return {"schema": "unknown", "has_embeddings": False, "sample_records": [], "sample_chunks": [], "unique_sources": 0}
+        return {
+            "schema": "unknown", "has_embeddings": False,
+            "sample_records": [], "sample_chunks": [], "unique_sources": 0,
+            "available_keys": [],
+        }
 
     schema = detect_schema(samples_raw[0])
     has_embeddings = schema == "pipeline" and bool(samples_raw[0].get("embedding"))
 
     sample_chunks = []
     for rec in samples_raw:
-        chunk, _ = map_record(rec, schema)
+        if field_map:
+            chunk, _ = _map_with_fieldmap(
+                rec, field_map,
+                extra_tags=[],
+                tags_static=tags_static or [],
+                section_join=section_join,
+            )
+        else:
+            chunk, _ = map_record(rec, schema)
         sample_chunks.append(chunk)
 
     return {
@@ -344,11 +377,83 @@ def peek_jsonl(
         "sample_records": samples_raw,
         "sample_chunks":  sample_chunks,
         "unique_sources": len(sources_seen),
+        "available_keys": sorted(all_keys),
     }
 
 
 # ---------------------------------------------------------------------------
-# Full import → Redis staging
+# Save a field mapping as a reusable named schema in schemas.yaml
+# ---------------------------------------------------------------------------
+
+def save_custom_schema(
+    name: str,
+    field_map: dict[str, str],
+    required_keys: list[str] | None = None,
+    exclude_keys: list[str] | None = None,
+    section_join: str = " > ",
+    tags_static: list[str] | None = None,
+) -> None:
+    """
+    Write (or overwrite) a named custom schema entry in ``schemas.yaml``.
+
+    The schema can then be auto-detected on future imports without the user
+    having to set up the field mapping again.
+
+    Parameters
+    ----------
+    name:           Unique schema name (e.g. ``"my_export_v2"``).
+    field_map:      Dict mapping pipeline fields to source keys.
+    required_keys:  Keys that must be present in a record to trigger
+                    auto-detection.  Defaults to the mapped source keys.
+    exclude_keys:   Keys whose presence disqualifies the schema.
+    section_join:   Separator for list-valued section fields.
+    tags_static:    Tags applied to every chunk under this schema.
+    """
+    data: dict = {}
+    if _SCHEMAS_FILE.exists():
+        try:
+            data = yaml.safe_load(_SCHEMAS_FILE.read_text(encoding="utf-8")) or {}
+        except Exception:
+            data = {}
+
+    schemas: list[dict] = data.get("schemas") or []
+
+    # Build the detect block — use mapped source keys as required if not given
+    if required_keys is None:
+        required_keys = [v for v in field_map.values() if v and "." not in v]
+
+    new_entry: dict[str, Any] = {
+        "name": name,
+        "detect": {
+            "required": required_keys or [],
+        },
+        "fields": {k: v for k, v in field_map.items() if v},
+        "section_join": section_join,
+    }
+    if exclude_keys:
+        new_entry["detect"]["exclude"] = exclude_keys
+    if tags_static:
+        new_entry["tags_static"] = tags_static
+
+    # Replace existing entry with same name, or append
+    idx = next((i for i, s in enumerate(schemas) if s.get("name") == name), None)
+    if idx is not None:
+        schemas[idx] = new_entry
+    else:
+        schemas.append(new_entry)
+
+    data["schemas"] = schemas
+    _SCHEMAS_FILE.write_text(
+        yaml.dump(data, allow_unicode=True, sort_keys=False, default_flow_style=False),
+        encoding="utf-8",
+    )
+    # Clear the in-memory cache so the new schema is picked up immediately
+    reload_schemas()
+    logger.info("Saved custom schema '%s' to %s", name, _SCHEMAS_FILE)
+
+
+# ---------------------------------------------------------------------------
+# Full import → staging
 # ---------------------------------------------------------------------------
 
 def import_jsonl(
@@ -360,6 +465,9 @@ def import_jsonl(
     usecase_id: str | None = None,
     agent_filter: str | None = None,
     require_usecase: bool = False,
+    field_map: dict[str, str] | None = None,
+    tags_static: list[str] | None = None,
+    section_join: str = " > ",
 ) -> dict[str, Any]:
     """
     Parse an entire JSONL file and stage all chunks as a single import batch.
@@ -391,6 +499,17 @@ def import_jsonl(
     require_usecase:
         When True, raise ``ValueError`` if either ``usecase_id`` or
         ``agent_filter`` cannot be resolved.
+    field_map:
+        Optional dict mapping pipeline field names to source record keys
+        (dot-notation supported), e.g. ``{"content": "body", "source": "url"}``.
+        When supplied, auto-schema detection is bypassed and every record is
+        mapped using this definition.  Recognised target fields:
+        ``content``, ``source``, ``title``, ``section``, ``chunk_id``,
+        ``tags``, ``embedding``.
+    tags_static:
+        Additional tags applied to every chunk when using ``field_map``.
+    section_join:
+        Separator used when the section field resolves to a list (default ``" > "``).
 
     Returns
     -------
@@ -484,15 +603,24 @@ def import_jsonl(
         except json.JSONDecodeError:
             continue
 
-        # Detect schema from first valid record
-        if schema_detected == "unknown":
-            schema_detected = detect_schema(rec)
+        # Map the record — use inline field_map if supplied, else auto-detect schema
+        if field_map:
+            schema_detected = "field_map"
+            chunk, embedding = _map_with_fieldmap(
+                rec, field_map,
+                extra_tags=extra_tags,
+                tags_static=tags_static or [],
+                section_join=section_join,
+            )
+        else:
+            if schema_detected == "unknown":
+                schema_detected = detect_schema(rec)
+            chunk, embedding = map_record(rec, schema_detected, extra_tags=extra_tags)
 
-        chunk, embedding = map_record(rec, schema_detected, extra_tags=extra_tags)
         if not chunk.content.strip():
             continue
 
-        src = rec.get("page_url") or rec.get("source") or rec.get("url", "")
+        src = rec.get("page_url") or rec.get("source") or rec.get("url", "") or chunk.source
         if src:
             unique_sources.add(src)
 

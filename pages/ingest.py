@@ -115,6 +115,109 @@ with tab_jsonl:
             st.warning(f"Could not preview file: {exc}")
             preview = None
 
+        # ── Field mapper ──────────────────────────────────────────────────────
+        _schema_unknown = not preview or preview.get("schema") == "unknown"
+        _avail_keys = preview.get("available_keys", []) if preview else []
+        field_map_inputs: dict[str, str] = {}  # populated inside the expander
+
+        _PIPELINE_FIELDS = [
+            ("content",  "Content *",  "The main text body of each chunk — required."),
+            ("source",   "Source",     "URL or file path that identifies the document."),
+            ("title",    "Title",      "Document or page title."),
+            ("section",  "Section",    "Heading path / breadcrumb (can be a list)."),
+            ("chunk_id", "Chunk ID",   "Unique identifier per chunk; auto-generated if omitted."),
+            ("tags",     "Tags",       "List or comma-separated string of tags."),
+            ("embedding","Embedding",  "Pre-computed float vector; skips re-embedding if present."),
+        ]
+
+        with st.expander(
+            "Field mapper — convert key names to pipeline fields",
+            expanded=_schema_unknown,
+        ):
+            if not _avail_keys:
+                st.caption("Upload a JSONL file to see available keys.")
+            else:
+                st.caption(
+                    "Map your JSONL keys to the fields this pipeline expects. "
+                    "Leave a field as **(none)** to skip it. "
+                    "The mapping overrides auto-detection for this import."
+                )
+
+                _none_opt = "(none)"
+                _key_opts  = [_none_opt] + _avail_keys
+
+                field_map_inputs: dict[str, str] = {}
+                cols = st.columns(2)
+                for i, (fld, label, tip) in enumerate(_PIPELINE_FIELDS):
+                    with cols[i % 2]:
+                        # Smart default: pre-select if key name matches
+                        _default = fld if fld in _avail_keys else _none_opt
+                        chosen = st.selectbox(
+                            label,
+                            _key_opts,
+                            index=_key_opts.index(_default),
+                            help=tip,
+                            key=f"fm_{fld}",
+                        )
+                        if chosen != _none_opt:
+                            field_map_inputs[fld] = chosen
+
+                # Live preview of first record through the mapping
+                if field_map_inputs and preview and preview.get("sample_records"):
+                    st.divider()
+                    st.caption("Preview — first record through your mapping:")
+                    try:
+                        from pipeline.jsonl_importer import peek_jsonl as _peek
+                        _mapped_preview = _peek(
+                            jsonl_file,
+                            n=1,
+                            field_map=field_map_inputs,
+                        )
+                        if _mapped_preview["sample_chunks"]:
+                            c = _mapped_preview["sample_chunks"][0]
+                            st.markdown(f"**Title:** {c.title or '—'}")
+                            st.markdown(f"**Source:** {c.source or '—'}")
+                            st.markdown(f"**Section:** {c.section or '—'}")
+                            st.text(c.content[:400] + ("…" if len(c.content) > 400 else ""))
+                    except Exception as _prev_exc:
+                        st.warning(f"Preview error: {_prev_exc}")
+
+                st.divider()
+
+                # Save as reusable schema
+                st.caption("Save this mapping as a reusable named schema:")
+                _sc1, _sc2 = st.columns([3, 1])
+                with _sc1:
+                    _schema_name = st.text_input(
+                        "Schema name",
+                        placeholder="my_export_format",
+                        label_visibility="collapsed",
+                        key="fm_schema_name",
+                    )
+                with _sc2:
+                    if st.button("Save schema", key="fm_save_schema"):
+                        if not _schema_name.strip():
+                            st.error("Enter a schema name.")
+                        elif not field_map_inputs:
+                            st.error("Map at least one field first.")
+                        elif "content" not in field_map_inputs:
+                            st.error("The content field is required.")
+                        else:
+                            try:
+                                from pipeline.jsonl_importer import save_custom_schema
+                                save_custom_schema(
+                                    name=_schema_name.strip(),
+                                    field_map=field_map_inputs,
+                                )
+                                st.success(f"Schema '{_schema_name.strip()}' saved to schemas.yaml.")
+                            except Exception as _se:
+                                st.error(f"Could not save schema: {_se}")
+
+        # Resolve what field_map to use for the actual import
+        _active_field_map: dict[str, str] | None = (
+            field_map_inputs if field_map_inputs and "content" in field_map_inputs else None
+        )
+
         st.divider()
 
         # ── JSONL-specific controls ───────────────────────────────────────────
@@ -185,7 +288,8 @@ with tab_jsonl:
                     kb_name=jsonl_kb_name.strip() or "default",
                     usecase_id=jsonl_usecase_id.strip() or None,
                     agent_filter=jsonl_agent_filter.strip() or None,
-                    require_usecase=bool(_is_crawler),
+                    require_usecase=bool(_is_crawler) and not _active_field_map,
+                    field_map=_active_field_map,
                 )
                 progress_bar.progress(1.0, text="Done!")
                 st.session_state["last_jsonl_import"] = result
