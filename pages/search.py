@@ -94,7 +94,7 @@ with st.form("search_form", border=False):
         )
     with f3:
         st.write("")  # spacer
-        submitted = st.form_submit_button("Search", type="primary", use_container_width=True)
+        submitted = st.form_submit_button("Search", type="primary", width="stretch")
 
 # ── Tag filter (outside form so it's more accessible) ─────────────────────────
 tags_filter_raw = st.text_input(

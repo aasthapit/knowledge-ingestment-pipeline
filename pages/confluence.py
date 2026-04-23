@@ -159,7 +159,7 @@ if not conn_ready:
 if st.button(
     "🚀  Start crawl",
     type="primary",
-    use_container_width=True,
+    width="stretch",
     disabled=not conn_ready,
 ):
     try:
@@ -269,7 +269,7 @@ if st.button(
             data=jsonl_bytes,
             file_name=filename,
             mime="application/x-ndjson",
-            use_container_width=True,
+            width="stretch",
         )
 
 # ── Staging result card ───────────────────────────────────────────────────────

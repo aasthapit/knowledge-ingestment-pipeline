@@ -101,7 +101,7 @@ if approved:
         if st.button(
             f"🚀  Push {len(approved)} approved document{'s' if len(approved) != 1 else ''} to Knowledge Base",
             type="primary",
-            use_container_width=True,
+            width="stretch",
         ):
             with st.spinner("Embedding and pushing …"):
                 from pipeline import review as rev
@@ -241,7 +241,7 @@ for doc in visible_docs:
                     pc1, pc2, pc3 = st.columns([1, 3, 1])
                     with pc1:
                         if st.button("← Prev", key=f"prev_{doc_id}", disabled=page == 0,
-                                     use_container_width=True):
+                                     width="stretch"):
                             st.session_state[page_key] = page - 1
                             st.rerun()
                     with pc2:
@@ -254,7 +254,7 @@ for doc in visible_docs:
                     with pc3:
                         if st.button("Next →", key=f"next_{doc_id}",
                                      disabled=page >= total_pages - 1,
-                                     use_container_width=True):
+                                     width="stretch"):
                             st.session_state[page_key] = page + 1
                             st.rerun()
 
@@ -405,18 +405,18 @@ for doc in visible_docs:
 
         # Approve
         if status != "approved":
-            if btn_cols[0].button("✅  Approve", key=f"approve_{doc_id}", use_container_width=True):
+            if btn_cols[0].button("✅  Approve", key=f"approve_{doc_id}", width="stretch"):
                 from pipeline import review as rev
                 rev.approve_doc(doc_id)
                 st.toast(f"Approved: {title}", icon="✅")
                 st.cache_data.clear()
                 st.rerun()
         else:
-            btn_cols[0].button("✅  Approved", key=f"noop_approve_{doc_id}", disabled=True, use_container_width=True)
+            btn_cols[0].button("✅  Approved", key=f"noop_approve_{doc_id}", disabled=True, width="stretch")
 
         # Push single doc
         if status == "approved":
-            if btn_cols[1].button("🚀  Push now", key=f"push_{doc_id}", use_container_width=True):
+            if btn_cols[1].button("🚀  Push now", key=f"push_{doc_id}", width="stretch"):
                 with st.spinner(f"Pushing {title} …"):
                     from pipeline import review as rev
                     res = rev.push_approved(doc_id=doc_id)
@@ -429,7 +429,7 @@ for doc in visible_docs:
 
         # Reject with reason popover
         if status != "rejected":
-            with btn_cols[2].popover("❌  Reject", use_container_width=True):
+            with btn_cols[2].popover("❌  Reject", width="stretch"):
                 reason = st.text_input(
                     "Reason *(optional)*",
                     key=f"reason_{doc_id}",
@@ -445,7 +445,7 @@ for doc in visible_docs:
             reject_reason = doc.get("reject_reason", "")
             btn_cols[2].button(
                 "❌  Rejected", key=f"noop_reject_{doc_id}",
-                disabled=True, use_container_width=True,
+                disabled=True, width="stretch",
                 help=f"Reason: {reject_reason}" if reject_reason else None,
             )
 

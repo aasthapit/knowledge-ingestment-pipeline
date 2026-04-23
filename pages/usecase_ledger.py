@@ -684,7 +684,7 @@ with tab_bulk:
                 if st.button(
                     "📋 Register all sources",
                     key="bulk_register",
-                    use_container_width=True,
+                    width="stretch",
                     help="Save all sources to MongoDB without crawling. You can crawl them later.",
                 ):
                     from pipeline.mongo_store import get_usecase_ledger
@@ -718,7 +718,7 @@ with tab_bulk:
                     "🚀 Register & Crawl all",
                     key="bulk_crawl",
                     type="primary",
-                    use_container_width=True,
+                    width="stretch",
                     help=(
                         "Register all sources, then immediately crawl and stage "
                         "each one. May take several minutes for large page trees."

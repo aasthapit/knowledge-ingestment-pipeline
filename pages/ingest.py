@@ -249,7 +249,7 @@ with tab_jsonl:
             key="jsonl_kb_name",
         )
 
-        if st.button("📦  Import JSONL", type="primary", use_container_width=True, key="jsonl_submit"):
+        if st.button("📦  Import JSONL", type="primary", width="stretch", key="jsonl_submit"):
             import io as _io
             jsonl_file.seek(0)
             file_bytes = _io.BytesIO(jsonl_file.read())
@@ -369,7 +369,7 @@ source_ready = uploaded_file is not None or bool(url_input.strip())
 if st.button(
     "Add to Knowledge Base",
     type="primary",
-    use_container_width=True,
+    width="stretch",
     disabled=not source_ready,
 ):
     tmp_path = None

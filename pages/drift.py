@@ -70,7 +70,7 @@ with col_run:
     run_check = st.button(
         "🔄  Check for changes",
         type="primary",
-        use_container_width=True,
+        width="stretch",
         help="Compares source file modification times and sizes against the last recorded push.",
     )
 
@@ -197,7 +197,7 @@ else:
                         "Re-ingest",
                         key=f"reingest_{doc_id}",
                         type="primary",
-                        use_container_width=True,
+                        width="stretch",
                         help="Re-process the source file and update the knowledge base.",
                     ):
                         try:
@@ -222,7 +222,7 @@ else:
                         "Remove",
                         key=f"remove_{doc_id}",
                         type="secondary",
-                        use_container_width=True,
+                        width="stretch",
                         help="Remove this document record from the ledger.",
                     ):
                         try:
@@ -239,7 +239,7 @@ else:
                 if st.button(
                     "Check",
                     key=f"check_{doc_id}",
-                    use_container_width=True,
+                    width="stretch",
                     help="Check drift status for this document only.",
                 ):
                     try:
