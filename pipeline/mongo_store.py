@@ -1158,3 +1158,217 @@ def get_usecase_ledger() -> UsecaseLedger:
     if _usecase_ledger is None:
         _usecase_ledger = UsecaseLedger()
     return _usecase_ledger
+
+
+# ---------------------------------------------------------------------------
+# CorpusStore
+# ---------------------------------------------------------------------------
+
+class CorpusStore:
+    """
+    Manages named corpora — first-class entities that group documents for a
+    specific use case.  A corpus owns references to its documents/chunks and
+    records an add/remove changelog.  Multiple corpora may share the same
+    document (many-to-many).
+
+    Collections used:
+    - ``corpora``           — one doc per corpus
+    - ``corpus_changelog``  — immutable audit trail of add/remove events
+    """
+
+    def __init__(self, db: Database | None = None) -> None:
+        self._db: Database = db or _get_db()
+        self._coll: Collection = self._db[_coll_name("corpora")]
+        self._changelog: Collection = self._db[_coll_name("corpus_changelog")]
+        self._ensure_indexes()
+
+    def _ensure_indexes(self) -> None:
+        self._coll.create_index("name", unique=True)
+        self._coll.create_index("usecase_id")
+        self._coll.create_index("agent_filter")
+        self._changelog.create_index("corpus_id")
+        self._changelog.create_index("timestamp")
+
+    # ------------------------------------------------------------------
+    # Create / update
+    # ------------------------------------------------------------------
+
+    def create(
+        self,
+        name: str,
+        description: str = "",
+        kb_names: list[str] | None = None,
+        usecase_id: str = "",
+        agent_filter: str = "",
+        sources: list[dict] | None = None,
+    ) -> str:
+        """Create a new corpus and return its corpus_id."""
+        now = datetime.now(timezone.utc)
+        corpus_id = str(uuid.uuid4())
+        self._coll.insert_one({
+            "_id": corpus_id,
+            "name": name,
+            "description": description,
+            "kb_names": kb_names or ["default"],
+            "usecase_id": usecase_id,
+            "agent_filter": agent_filter,
+            "sources": sources or [],
+            "doc_ids": [],
+            "chunk_ids": [],
+            "doc_count": 0,
+            "chunk_count": 0,
+            "created_at": now,
+            "last_updated": now,
+        })
+        return corpus_id
+
+    def update(
+        self,
+        corpus_id: str,
+        name: str | None = None,
+        description: str | None = None,
+        kb_names: list[str] | None = None,
+        usecase_id: str | None = None,
+        agent_filter: str | None = None,
+        sources: list[dict] | None = None,
+    ) -> None:
+        fields: dict[str, Any] = {"last_updated": datetime.now(timezone.utc)}
+        if name is not None:
+            fields["name"] = name
+        if description is not None:
+            fields["description"] = description
+        if kb_names is not None:
+            fields["kb_names"] = kb_names
+        if usecase_id is not None:
+            fields["usecase_id"] = usecase_id
+        if agent_filter is not None:
+            fields["agent_filter"] = agent_filter
+        if sources is not None:
+            fields["sources"] = sources
+        self._coll.update_one({"_id": corpus_id}, {"$set": fields})
+
+    # ------------------------------------------------------------------
+    # Document membership
+    # ------------------------------------------------------------------
+
+    def add_docs(
+        self,
+        corpus_id: str,
+        doc_ids: list[str],
+        chunk_ids: list[str],
+        titles: list[str] | None = None,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        self._coll.update_one(
+            {"_id": corpus_id},
+            {
+                "$addToSet": {
+                    "doc_ids": {"$each": doc_ids},
+                    "chunk_ids": {"$each": chunk_ids},
+                },
+                "$set": {"last_updated": now},
+            },
+        )
+        self._recalc_counts(corpus_id)
+        for i, doc_id in enumerate(doc_ids):
+            self._changelog.insert_one({
+                "corpus_id": corpus_id,
+                "action": "added",
+                "doc_id": doc_id,
+                "title": (titles[i] if titles and i < len(titles) else ""),
+                "timestamp": now,
+            })
+
+    def remove_docs(
+        self,
+        corpus_id: str,
+        doc_ids: list[str],
+        chunk_ids: list[str],
+        titles: list[str] | None = None,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        self._coll.update_one(
+            {"_id": corpus_id},
+            {
+                "$pullAll": {
+                    "doc_ids": doc_ids,
+                    "chunk_ids": chunk_ids,
+                },
+                "$set": {"last_updated": now},
+            },
+        )
+        self._recalc_counts(corpus_id)
+        for i, doc_id in enumerate(doc_ids):
+            self._changelog.insert_one({
+                "corpus_id": corpus_id,
+                "action": "removed",
+                "doc_id": doc_id,
+                "title": (titles[i] if titles and i < len(titles) else ""),
+                "timestamp": now,
+            })
+
+    def _recalc_counts(self, corpus_id: str) -> None:
+        doc = self._coll.find_one({"_id": corpus_id}, {"doc_ids": 1, "chunk_ids": 1})
+        if doc:
+            self._coll.update_one(
+                {"_id": corpus_id},
+                {"$set": {
+                    "doc_count": len(doc.get("doc_ids") or []),
+                    "chunk_count": len(doc.get("chunk_ids") or []),
+                }},
+            )
+
+    # ------------------------------------------------------------------
+    # Read operations
+    # ------------------------------------------------------------------
+
+    def get(self, corpus_id: str) -> dict[str, Any] | None:
+        doc = self._coll.find_one({"_id": corpus_id})
+        return self._serialize(doc) if doc else None
+
+    def get_by_name(self, name: str) -> dict[str, Any] | None:
+        doc = self._coll.find_one({"name": name})
+        return self._serialize(doc) if doc else None
+
+    def list_all(self) -> list[dict[str, Any]]:
+        results = []
+        for doc in self._coll.find({}, {"chunk_ids": 0}, sort=[("last_updated", DESCENDING)]):
+            results.append(self._serialize(doc))
+        return results
+
+    def get_changelog(self, corpus_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        results = []
+        for entry in self._changelog.find(
+            {"corpus_id": corpus_id},
+            sort=[("timestamp", DESCENDING)],
+            limit=limit,
+        ):
+            entry.pop("_id", None)
+            if isinstance(entry.get("timestamp"), datetime):
+                entry["timestamp"] = entry["timestamp"].isoformat()
+            results.append(entry)
+        return results
+
+    def delete(self, corpus_id: str) -> None:
+        self._coll.delete_one({"_id": corpus_id})
+        self._changelog.delete_many({"corpus_id": corpus_id})
+
+    @staticmethod
+    def _serialize(doc: dict[str, Any]) -> dict[str, Any]:
+        doc["corpus_id"] = doc.pop("_id", None)
+        for key in ("created_at", "last_updated"):
+            val = doc.get(key)
+            if isinstance(val, datetime):
+                doc[key] = val.isoformat()
+        return doc
+
+
+_corpus_store: CorpusStore | None = None
+
+
+def get_corpus_store() -> CorpusStore:
+    """Return (or create) the shared CorpusStore instance."""
+    global _corpus_store
+    if _corpus_store is None:
+        _corpus_store = CorpusStore()
+    return _corpus_store
