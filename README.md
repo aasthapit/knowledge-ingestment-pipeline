@@ -2,32 +2,55 @@
 
 A tool for building and maintaining AI knowledge bases. It takes documents from various sources — PDFs, Word files, web pages, Confluence wikis, JSONL exports — converts them into a searchable format, and gives you a review step before anything reaches your AI agents.
 
-```
-Knowledge Base (Confluence URLs or JSONL file)
-      │
-      ▼
-  Crawl / Import  ─── fetch Confluence pages or parse JSONL records
-      │
-      ▼
-  Convert & chunk  ─── breaks content into small, retrievable sections
-      │
-      ▼
-  Quality check    ─── flags sections that are too short, too long, boilerplate, or stale
-      │
-      ├── all clear → auto-approved
-      └── flagged   → sent to human review queue
-            │
-            ▼
-      Review Queue  ─── inspect, approve, reject, or edit before anything goes live
-            │
-            ▼
-      Push to Corpus ─── corpus defines use case context + target vector DB
-            │
-            ▼
-      Embed & index ─── sections become searchable vectors in the target vector DB
-            │
-            ▼
-      Ledger ─── AI agents query it; ledger tracks what's there and when
+```mermaid
+flowchart LR
+    subgraph src["① Sources"]
+        direction TB
+        C["🔗 Confluence\npage tree"]
+        J["📦 JSONL\nfile upload"]
+        D["📄 PDF · Word\nHTML · URL"]
+    end
+
+    subgraph kb["② Knowledge Base"]
+        direction TB
+        KB[("Named source\nconfluence | jsonl")]
+    end
+
+    subgraph stage["③ Staging"]
+        direction TB
+        IN["Ingest & chunk"]
+        QC{"Quality\ncheck"}
+        AP["Auto-approved"]
+        RQ["Review queue"]
+    end
+
+    subgraph rev["④ Review"]
+        direction TB
+        OK["✅ Approve"]
+        NO["❌ Reject"]
+        ED["✏️ Edit / Split"]
+    end
+
+    subgraph corpus["⑤ Corpus"]
+        direction TB
+        CO["usecase_id\nagent_filter\nvector_store"]
+    end
+
+    subgraph vdb["⑥ Vector DB"]
+        direction TB
+        RD[("Redis\nStack")]
+        CU[("Custom\nHTTP DB")]
+    end
+
+    C & J & D --> KB
+    KB --> IN
+    IN --> QC
+    QC -- "passes" --> AP
+    QC -- "flagged" --> RQ
+    AP & RQ --> OK
+    OK --> CO
+    CO -- "push" --> RD
+    CO -- "push" --> CU
 ```
 
 ---
@@ -89,6 +112,103 @@ A frozen, corpus-scoped snapshot of all pushed JSONL documents at a point in tim
 ### KB Ledger
 
 A permanent record of every document push. Each entry records which KB it came from, which corpus it was pushed for, and the chunk count and drift status.
+
+---
+
+## Data model relationships
+
+```mermaid
+erDiagram
+    KnowledgeBase {
+        string kb_id PK
+        string name
+        string source_type "confluence | jsonl"
+        string[] confluence_urls
+        string file_ref
+        string status "empty | staging | ready"
+    }
+    DataCorpus {
+        string corpus_id PK
+        string name
+        string usecase_id
+        string agent_filter
+        string[] kb_ids FK
+        string vector_store_id FK
+    }
+    VectorStoreConfig {
+        string vs_id PK
+        string name
+        string type "redis | custom"
+        string endpoint
+        string collection
+    }
+    StagingDoc {
+        string doc_id PK
+        string kb_id FK
+        string status "pending_review | approved | pushed | rejected"
+        string title
+        int chunk_count
+    }
+    Manifest {
+        string manifest_id PK
+        string corpus_id FK
+        string name
+        string status "open | frozen | archived"
+        object[] entries
+    }
+    KBLedger {
+        string doc_id PK
+        string kb_id FK
+        string usecase_id "from corpus at push time"
+        string agent_filter "from corpus at push time"
+        int chunk_count
+    }
+
+    KnowledgeBase ||--o{ StagingDoc : "stages"
+    KnowledgeBase ||--o{ KBLedger : "records pushes"
+    DataCorpus }o--o{ KnowledgeBase : "contains (many-to-many)"
+    DataCorpus ||--o{ Manifest : "snapshots"
+    DataCorpus }o--|| VectorStoreConfig : "targets"
+```
+
+---
+
+## How a document moves through the system
+
+```mermaid
+sequenceDiagram
+    actor U as User
+    participant KB as Knowledge Base
+    participant Stage as Staging Store
+    participant Rev as Review Queue
+    participant Corp as Corpus
+    participant VDB as Vector DB
+
+    U->>KB: Create KB (Confluence URLs or JSONL)
+    U->>KB: Trigger crawl / upload file
+
+    KB->>Stage: Enqueue docs tagged with kb_id
+    Stage-->>Stage: Chunk + quality-check each doc
+
+    alt all chunks pass quality check
+        Stage-->>Stage: Auto-approve
+    else one or more chunks flagged
+        Stage->>Rev: Send to review queue
+        U->>Rev: Inspect · approve · reject · edit
+    end
+
+    note over Rev,Corp: Approved docs wait until a corpus push is triggered
+
+    U->>Corp: Select corpus (usecase + agent + vector store)
+    U->>Corp: Push
+
+    Corp->>Stage: Fetch approved docs whose kb_id is in corpus.kb_ids
+    Corp->>VDB: Embed chunks + upsert vectors
+    Corp-->>Stage: Mark docs as pushed
+    Corp-->>Stage: Write entry to KB Ledger
+
+    note over VDB: AI agents now query this index,\nfiltered by usecase_id / agent_filter
+```
 
 ---
 
