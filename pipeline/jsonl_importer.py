@@ -468,6 +468,7 @@ def import_jsonl(
     field_map: dict[str, str] | None = None,
     tags_static: list[str] | None = None,
     section_join: str = " > ",
+    manifest_id: str | None = None,
 ) -> dict[str, Any]:
     """
     Parse an entire JSONL file and stage all chunks as a single import batch.
@@ -751,6 +752,23 @@ def import_jsonl(
     staging.enqueue(doc_id, meta, chunks_dicts)
     if quality_passed:
         staging.approve(doc_id)
+
+    if manifest_id:
+        try:
+            from pipeline.manifests import get_manifest_manager
+            get_manifest_manager().add_entry(
+                manifest_id=manifest_id,
+                doc_id=doc_id,
+                object_id=doc_id,
+                file_id=doc_id,
+                version_id=str(total),
+                source_type="jsonl",
+                source_ref=batch_name or "",
+                title=f"JSONL import — {batch_name}",
+                status=status,
+            )
+        except Exception as _manifest_exc:
+            logger.warning("Could not associate JSONL batch with manifest: %s", _manifest_exc)
 
     logger.info(
         "Staged JSONL batch '%s': %d chunks, %d unique sources, schema=%s, embeddings=%s",

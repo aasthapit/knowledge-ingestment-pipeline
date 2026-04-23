@@ -152,9 +152,24 @@ erDiagram
         datetime next_refresh_at
         string refresh_status
     }
+    doc_manifests {
+        string _id PK
+        string name
+        string usecase_id
+        string agent_filter
+        string kb_name
+        string status
+        list entries
+        int entry_count
+        int pushed_count
+        datetime created_at
+        datetime frozen_at
+    }
     staging_docs ||--o{ staging_chunks : "has chunks"
     staging_docs ||..o| kb_documents : "becomes ledger entry on push"
     kb_documents }o--|| usecase_ledger : "chunk IDs tracked per use case"
+    staging_docs }o..o{ doc_manifests : "entries reference doc_ids"
+    kb_documents }o..o{ doc_manifests : "entries reference pushed doc_ids"
 ```
 
 ---
@@ -203,6 +218,93 @@ sequenceDiagram
 
 ---
 
+## Document Manifests — corpus versioning
+
+A **Document Manifest** is a named, operable record that groups a set of source documents together with full provenance. Manifests serve as the versioning layer for the corpus.
+
+### Why manifests?
+
+| Need | Without manifests | With manifests |
+|---|---|---|
+| Know what was in the KB on a given date | Query kb_documents with date filter | Load the named snapshot manifest |
+| Re-ingest a previous corpus state | Manually re-crawl each source | `ingest_from_manifest(manifest_id)` |
+| Remove a batch of related docs | Delete one by one | `remove_manifest_docs(manifest_id)` |
+| A/B test two corpus versions | Manual bookkeeping | `diff_manifests(id_a, id_b)` |
+
+### Manifest states
+
+| Status | Meaning |
+|---|---|
+| **open** | Still accepting new entries; docs can be added during ingestion |
+| **frozen** | Immutable snapshot; created by Snapshot operation |
+| **archived** | Soft-deleted; excluded from default listing |
+
+### Per-entry fields
+
+Each document in a manifest carries:
+
+| Field | Description |
+|---|---|
+| `doc_id` | Matches `staging_docs._id` / `kb_documents._id` |
+| `object_id` | MongoDB `_id` of the staging or KB record |
+| `file_id` | Page ID (Confluence) or `doc_id` (file uploads) |
+| `version_id` | Confluence page version, or SHA-256 hash prefix for files |
+| `status` | `pending → staged → approved → pushed → removed` |
+| `source_type` | `confluence`, `jsonl`, `pdf`, `url`, etc. |
+| `source_ref` | Canonical URL, page ID, or file path |
+| `staged_at` / `pushed_at` / `removed_at` | Lifecycle timestamps |
+
+### Operations
+
+**Snapshot current corpus → manifest** (UI: Manifests › Create / Snapshot)
+
+Reads all `kb_documents` for a given (usecase_id, agent_filter) pair and saves them as a frozen manifest. Use this before model updates or major corpus changes.
+
+**Create manifest from source list** (UI: Manifests › Create / Snapshot)
+
+Define the intended corpus upfront as a list of Confluence URLs or other source refs. Entries start as `pending` until ingested.
+
+**Ingest from manifest** (UI: Manifests › Re-ingest)
+
+Re-crawls all Confluence sources listed in the manifest and stages them for review. File-upload entries are skipped — they require manual re-upload.
+
+**Remove manifest docs** (UI: Manifests › Browse › select entry)
+
+Deletes chunk vectors from Redis, removes records from `kb_documents`, and updates the use case ledger. If a doc_id appears in multiple manifests, all are updated to `removed`.
+
+**Diff two manifests** (UI: Manifests › Diff)
+
+Compares two manifests by `doc_id` and `version_id`, returning `added / removed / changed / unchanged` sets.
+
+### Auto-tracking during ingestion
+
+Pass `manifest_id` to `ingest_document()` or `ingest_jsonl()` to automatically record each new document into an open manifest as it is staged. This is the recommended flow when ingesting a planned corpus version.
+
+When `push_approved()` runs, it automatically updates the `status` of all manifest entries for the pushed `doc_id` to `pushed`.
+
+### MongoDB collection
+
+`doc_manifests` — one document per manifest, entries stored as an embedded array.
+
+```
+{
+  "_id":          manifest_id (UUID string),
+  "name":         "SSOP v2 Corpus",
+  "usecase_id":   "GENAI1597_SSOP",
+  "agent_filter": "ssop_cloud_operations_agent",
+  "status":       "open | frozen | archived",
+  "entry_count":  42,
+  "pushed_count": 40,
+  "entries": [
+    { "doc_id", "object_id", "file_id", "version_id",
+      "status", "source_type", "source_ref", "title",
+      "staged_at", "pushed_at", "removed_at" }
+  ]
+}
+```
+
+---
+
 ## Keeping the corpus healthy over time
 
 ### Adding content
@@ -211,7 +313,7 @@ Any new ingest creates new staging records. After review and push, the vector in
 
 ### Removing content
 
-Documents can be deleted from the KB Health page. The ledger stores chunk IDs, so removal is exact — only the selected document's vectors are deleted from the search index.
+Documents can be deleted from the KB Health page or via **Manifests › Browse › Remove**. The ledger stores chunk IDs, so removal is exact — only the selected document's vectors are deleted from the search index.
 
 ### Detecting staleness
 
@@ -221,7 +323,14 @@ For Confluence sources: the stored page-version snapshot is compared against cur
 
 ### Rolling back
 
-Staging records are kept after push by default. To roll back:
+With manifests, rollback is structured:
+
+1. Identify the manifest snapshot for the stable corpus version
+2. Use `diff_manifests()` to find what was added after that point
+3. Use `remove_manifest_docs()` on the newer manifest to remove those documents
+4. Re-ingest from the stable manifest if needed
+
+Without a manifest snapshot, the manual path is still available:
 
 1. Query `kb_documents` for documents pushed after your target date
 2. Collect their `chunk_ids`
@@ -239,3 +348,4 @@ Staging records are kept after push by default. To roll back:
 | MongoDB database | `MONGODB_DB_NAME` | `knowledge_pipeline` | All collections live here |
 | Collection prefix | `MONGODB_COLLECTION_PREFIX` | `""` | Separate environments, e.g. `prod_` |
 | JSONL output dir | `JSONL_OUTPUT_DIR` | `./output` | Where exports are written |
+| Doc manifests collection | `MONGODB_COLL_DOC_MANIFESTS` | `doc_manifests` | Override collection base name |

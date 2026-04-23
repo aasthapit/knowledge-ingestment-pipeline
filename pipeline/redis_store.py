@@ -191,6 +191,23 @@ def get_chunk(chunk_id: str, client: redis.Redis | None = None) -> dict[str, Any
     return raw
 
 
+def delete_chunks(
+    chunk_ids: list[str],
+    client: redis.Redis | None = None,
+) -> int:
+    """
+    Delete chunks from Redis by their chunk_ids.
+    Returns the number of keys actually deleted.
+    """
+    if not chunk_ids:
+        return 0
+    client = client or get_client()
+    keys = [f"{settings.redis_key_prefix}{cid}" for cid in chunk_ids]
+    deleted = client.delete(*keys)
+    logger.info("Deleted %d/%d chunks from Redis.", deleted, len(chunk_ids))
+    return deleted
+
+
 def update_tags(
     chunk_id: str,
     tags: list[str],

@@ -309,6 +309,22 @@ def push_approved(
 
             staging.mark_pushed(did)
 
+            # Sync manifest entry status for every manifest referencing this doc_id
+            try:
+                from datetime import datetime as _dt, timezone as _tz
+                from pipeline.manifests import get_manifest_manager
+                _mm = get_manifest_manager()
+                _push_now = _dt.now(_tz.utc)
+                for _mf in _mm.find_manifests_by_doc_id(did):
+                    _mm.update_entry_status(
+                        manifest_id=_mf["manifest_id"],
+                        doc_id=did,
+                        status="pushed",
+                        pushed_at=_push_now,
+                    )
+            except Exception as _manifest_exc:
+                logger.warning("Could not update manifest entry after push: %s", _manifest_exc)
+
             if remove_after_push:
                 staging.remove_doc(did)
                 logger.info("Staging data removed for doc %s.", did)

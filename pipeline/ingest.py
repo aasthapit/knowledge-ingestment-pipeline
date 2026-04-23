@@ -141,6 +141,7 @@ def ingest_document(
     kb_name: str = "default",
     usecase_id: str | None = None,
     agent_filter: str | None = None,
+    manifest_id: str | None = None,
 ) -> dict:
     """
     Ingest any supported document format through the full pipeline.
@@ -258,6 +259,25 @@ def ingest_document(
             citation.title, " | ".join(result.flags),
         )
 
+    if manifest_id:
+        try:
+            import hashlib
+            from pipeline.manifests import get_manifest_manager
+            version_id = hashlib.sha256(str(source).encode()).hexdigest()[:16]
+            get_manifest_manager().add_entry(
+                manifest_id=manifest_id,
+                doc_id=doc_id,
+                object_id=doc_id,
+                file_id=doc_id,
+                version_id=version_id,
+                source_type=citation.source_type,
+                source_ref=str(source),
+                title=citation.title,
+                status=status,
+            )
+        except Exception as _manifest_exc:
+            logger.warning("Could not associate doc with manifest: %s", _manifest_exc)
+
     # 6 — Optional immediate push
     if auto_push and result.passed:
         push_result = push_approved(doc_id=doc_id)
@@ -293,6 +313,7 @@ def ingest_jsonl(
     field_map: dict[str, str] | None = None,
     tags_static: list[str] | None = None,
     section_join: str = " > ",
+    manifest_id: str | None = None,
 ) -> dict:
     """
     Import a JSONL chunk file into the staging area.
@@ -344,6 +365,7 @@ def ingest_jsonl(
         field_map=field_map,
         tags_static=tags_static,
         section_join=section_join,
+        manifest_id=manifest_id,
     )
 
 

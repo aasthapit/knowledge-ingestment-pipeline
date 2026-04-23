@@ -35,6 +35,7 @@ pg = st.navigation(
             st.Page("pages/drift.py",            title="KB Health",        icon="🔍"),
             st.Page("pages/ledger.py",           title="Ledger",           icon="📒"),
             st.Page("pages/usecase_ledger.py",   title="Use Case Ledger",  icon="🗂️"),
+            st.Page("pages/manifests.py",        title="Manifests",        icon="📑"),
             st.Page("pages/status.py",           title="Status",           icon="⚙️"),
         ],
     }
