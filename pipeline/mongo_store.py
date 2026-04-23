@@ -216,18 +216,20 @@ class MongoStagingStore:
         # Upsert so re-ingest of the same doc_id refreshes the record
         self._docs.replace_one({"_id": doc_id}, doc, upsert=True)
 
-        # Replace chunk records for this doc
+        # Replace chunk records for this doc.
+        # Use bulk upsert (ReplaceOne) rather than delete+insert so that
+        # re-ingesting a source whose chunk count changed (and therefore
+        # produces a new doc_id) never hits E11000 on pre-existing chunk_ids.
         if chunks:
-            self._chunks.delete_many({"doc_id": doc_id})
-            chunk_docs = []
+            from pymongo import ReplaceOne
+            ops = []
             for c in chunks:
                 cd = dict(c)
                 cd["doc_id"] = doc_id
-                # Use chunk_id as _id if available
                 if "chunk_id" in cd:
                     cd["_id"] = cd.pop("chunk_id")
-                chunk_docs.append(cd)
-            self._chunks.insert_many(chunk_docs, ordered=False)
+                ops.append(ReplaceOne({"_id": cd["_id"]}, cd, upsert=True))
+            self._chunks.bulk_write(ops, ordered=False)
 
         logger.debug("Staged doc %s (%d chunks)", doc_id, len(chunks))
 

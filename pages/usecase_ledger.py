@@ -257,7 +257,6 @@ with tab_ledger:
 
                 st.dataframe(
                     pd.DataFrame(doc_rows),
-                    use_container_width=True,
                     hide_index=True,
                     column_config={
                         "Quality": st.column_config.ProgressColumn(
@@ -284,7 +283,6 @@ with tab_ledger:
                     })
                 st.dataframe(
                     pd.DataFrame(rows),
-                    use_container_width=True,
                     hide_index=True,
                     column_config={
                         "Chunks": st.column_config.NumberColumn("Chunks", format="%d"),
@@ -334,7 +332,6 @@ with tab_sources:
 
         st.dataframe(
             pd.DataFrame(src_rows),
-            use_container_width=True,
             hide_index=True,
         )
 
@@ -674,7 +671,7 @@ with tab_bulk:
                     "Cron":          e.get("refresh_cron") or "—",
                 })
 
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(rows), hide_index=True)
             st.caption(f"{len(entries)} source(s) in manifest.")
 
             # ── Action buttons ────────────────────────────────────────────────

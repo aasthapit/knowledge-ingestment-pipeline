@@ -121,7 +121,6 @@ with tab_browse:
         df = pd.DataFrame(rows)
         selection = st.dataframe(
             df.drop(columns=["manifest_id"]),
-            use_container_width=True,
             hide_index=True,
             on_select="rerun",
             selection_mode="single-row",
@@ -203,7 +202,6 @@ with tab_browse:
                     entry_df = pd.DataFrame(entry_rows)
                     entry_sel = st.dataframe(
                         entry_df.drop(columns=["doc_id"]),
-                        use_container_width=True,
                         hide_index=True,
                         on_select="rerun",
                         selection_mode="single-row",
@@ -452,7 +450,7 @@ with tab_diff:
                                     }
                                     for e in result["added"]
                                 ]
-                                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                                st.dataframe(pd.DataFrame(rows), hide_index=True)
 
                         if result["removed"]:
                             with st.expander(f"🗑️ {n_removed} removed"):
@@ -465,7 +463,7 @@ with tab_diff:
                                     }
                                     for e in result["removed"]
                                 ]
-                                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                                st.dataframe(pd.DataFrame(rows), hide_index=True)
 
                         if result["changed"]:
                             with st.expander(f"✏️ {n_changed} changed"):
@@ -479,7 +477,7 @@ with tab_diff:
                                         "Version before": before.get("version_id", ""),
                                         "Version after":  after.get("version_id", ""),
                                     })
-                                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                                st.dataframe(pd.DataFrame(rows), hide_index=True)
 
 
 # =============================================================================

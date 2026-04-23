@@ -172,7 +172,6 @@ df = pd.DataFrame(rows)
 
 st.dataframe(
     df,
-    use_container_width=True,
     hide_index=True,
     column_config={
         "Quality": st.column_config.ProgressColumn(
@@ -216,7 +215,6 @@ else:
     snap_df = pd.DataFrame(snap_rows)
     selected = st.dataframe(
         snap_df.drop(columns=["_id"]),
-        use_container_width=True,
         hide_index=True,
         on_select="rerun",
         selection_mode="single-row",
@@ -262,7 +260,6 @@ else:
 
             st.dataframe(
                 snap_doc_df,
-                use_container_width=True,
                 hide_index=True,
                 column_config={
                     "Quality": st.column_config.ProgressColumn(
