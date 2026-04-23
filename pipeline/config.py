@@ -64,7 +64,7 @@ class Settings:
     confluence_email: str     = os.getenv("CONFLUENCE_EMAIL", "")
     confluence_api_token: str = os.getenv("CONFLUENCE_API_TOKEN", "")
     confluence_verify_ssl: bool = (
-        os.getenv("CONFLUENCE_VERIFY_SSL", "true").lower() not in ("0", "false", "no")
+        os.getenv("CONFLUENCE_VERIFY_SSL", "false").lower() not in ("0", "false", "no")
     )
 
     # ── MongoDB (staging store + KB ledger) ───────────────────────────────

@@ -157,6 +157,10 @@ class ConfluenceCrawler:
         self.base_url  = base_url.rstrip("/")
         self.auth_type = auth_type.lower()
 
+        if not verify_ssl:
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
         if self.auth_type == "cloud":
             if not email or not api_token:
                 raise ValueError("Cloud auth requires both email and api_token.")
