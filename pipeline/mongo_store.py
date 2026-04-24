@@ -239,6 +239,13 @@ class MongoStagingStore:
             }},
         )
 
+    def reopen(self, doc_id: str) -> None:
+        """Reset a rejected document back to pending_review."""
+        self._docs.update_one(
+            {"_id": doc_id},
+            {"$set": {"status": "pending_review"}, "$unset": {"reject_reason": ""}},
+        )
+
     def mark_pushed(self, doc_id: str) -> None:
         """Mark a document as pushed to the vector store."""
         self._docs.update_one(

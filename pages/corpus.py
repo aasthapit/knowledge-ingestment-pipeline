@@ -300,7 +300,7 @@ with right:
             corpus_kb_ids       = corpus.get("kb_ids") or []
             corpus_kb_ids_tuple = tuple(sorted(corpus_kb_ids))
 
-            tab_kbs, tab_docs, tab_export = st.tabs(["Knowledge Bases", "Documents", "Export"])
+            tab_kbs, tab_docs, tab_export, tab_history = st.tabs(["Knowledge Bases", "Documents", "Export", "History"])
 
             # ── KBs tab ───────────────────────────────────────────────────────
             with tab_kbs:
@@ -479,3 +479,29 @@ with right:
                                         st.rerun()
                                     except Exception as exc:
                                         st.error(f"Push failed: {exc}")
+
+            # ── History tab ───────────────────────────────────────────────────
+            with tab_history:
+                try:
+                    from pipeline.mongo_store import get_corpus_store
+                    changelog = get_corpus_store().get_changelog(sel_id, limit=50)
+                except Exception as exc:
+                    changelog = []
+                    st.warning(f"Could not load changelog: {exc}")
+
+                if not changelog:
+                    st.info("No KB membership changes recorded yet.")
+                else:
+                    import pandas as pd
+                    kb_name_map = {kb["kb_id"]: kb.get("name", kb["kb_id"]) for kb in _load_kbs()}
+                    rows = []
+                    for entry in changelog:
+                        action = entry.get("action", "")
+                        label = "Added" if action == "kb_added" else "Removed"
+                        kid = entry.get("kb_id", "")
+                        rows.append({
+                            "Time":            _fmt_date(entry.get("timestamp")),
+                            "Action":          label,
+                            "Knowledge Base":  kb_name_map.get(kid, kid),
+                        })
+                    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)

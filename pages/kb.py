@@ -312,14 +312,19 @@ with right:
 
             # ── Delete confirm ────────────────────────────────────────────────
             if st.session_state.get(f"confirm_del_kb_{sel_id}"):
-                st.warning(
-                    f"Delete **{kb_name}**? This removes the KB record but does not delete "
-                    "staging documents — they remain in the review queue."
+                st.warning(f"Delete **{kb_name}**? This removes the KB record permanently.")
+                del_staged = st.checkbox(
+                    "Also delete all staged documents for this KB",
+                    value=True,
+                    key=f"del_staged_{sel_id}",
+                    help="Removes staging entries from the review queue. Pushed (ledger) records are not affected.",
                 )
                 dc1, dc2, _ = st.columns([1, 1, 4])
                 with dc1:
                     if st.button("Yes, delete", type="primary", key="confirm_del_kb_yes"):
-                        from pipeline.mongo_store import get_kb_store
+                        from pipeline.mongo_store import get_kb_store, get_staging
+                        if del_staged:
+                            get_staging().clear_by_kb(sel_id)
                         get_kb_store().delete(sel_id)
                         _invalidate()
                         st.session_state.kb_selected = None
@@ -482,6 +487,14 @@ with right:
                     "🌐 Run your external web crawler against the seed URLs above and import "
                     "the resulting JSONL on the **Add Document** page."
                 )
+                with st.popover("🗑  Clear staged content", use_container_width=False):
+                    st.warning("Remove all staged documents for this KB from the review queue? This cannot be undone.")
+                    if st.button("Confirm clear", type="primary", key=f"web_clear_{sel_id}"):
+                        from pipeline.mongo_store import get_staging
+                        n = get_staging().clear_by_kb(sel_id)
+                        st.toast(f"Cleared {n} staged document(s)", icon="🗑")
+                        _invalidate()
+                        st.rerun()
 
             # ── JSONL details ─────────────────────────────────────────────────
             elif source_type == "jsonl":

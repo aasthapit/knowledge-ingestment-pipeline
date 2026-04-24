@@ -132,6 +132,22 @@ except Exception:
 corpus_opts = {c["name"]: c["corpus_id"] for c in all_corpora}
 push_corpus_label: str = list(corpus_opts.keys())[0] if corpus_opts else ""
 
+# ── Bulk approve ─────────────────────────────────────────────────────────────
+if pending:
+    st.divider()
+    with st.popover(f"✅  Approve all {len(pending)} pending document{'s' if len(pending) != 1 else ''}", use_container_width=True):
+        st.warning(
+            f"This will approve all **{len(pending)}** pending document(s)"
+            + (f" in KB *{active_kb_id}*" if active_kb_id else "")
+            + ". They will not be pushed — you can push separately afterwards."
+        )
+        if st.button("Confirm approve all", type="primary", key="confirm_approve_all"):
+            from pipeline import review as rev
+            count = sum(1 for d in pending if rev.approve_doc(d["doc_id"]))
+            st.toast(f"Approved {count} documents", icon="✅")
+            st.cache_data.clear()
+            st.rerun()
+
 # ── Push all approved ─────────────────────────────────────────────────────────
 if approved:
     st.divider()
@@ -522,7 +538,13 @@ for doc in visible_docs:
                 disabled=True, width="stretch",
                 help=f"Reason: {reject_reason}" if reject_reason else None,
             )
-            with btn_cols[1].popover("🗑  Delete", width="stretch"):
+            if btn_cols[1].button("↩  Re-open", key=f"reopen_{doc_id}", width="stretch"):
+                from pipeline.mongo_store import get_staging
+                get_staging().reopen(doc_id)
+                st.toast(f"Re-opened: {title}", icon="↩")
+                st.cache_data.clear()
+                st.rerun()
+            with btn_cols[3].popover("🗑  Delete", width="stretch"):
                 st.warning(f"Permanently delete **{title}** and all its chunks?")
                 if st.button("Confirm delete", key=f"confirm_del_{doc_id}", type="primary"):
                     from pipeline.mongo_store import get_staging

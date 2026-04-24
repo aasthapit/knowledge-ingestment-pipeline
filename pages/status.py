@@ -139,6 +139,39 @@ with cfg_right:
         r1.caption(label)
         r2.write(value)
 
+# ── Background scheduler ──────────────────────────────────────────────────────
+st.divider()
+st.subheader("Background Scheduler")
+
+try:
+    from pipeline import refresh_scheduler as _sched
+    _s = _sched._scheduler
+    scheduler_running = bool(_s and _s.running)
+    if scheduler_running:
+        job = _s.get_job("confluence_refresh_poll")
+        next_run = job.next_run_time.strftime("%Y-%m-%d %H:%M:%S UTC") if job and job.next_run_time else "—"
+    else:
+        next_run = "—"
+except Exception:
+    scheduler_running = False
+    next_run = "—"
+
+try:
+    from pipeline.mongo_store import get_kb_store
+    scheduled_kbs = sum(1 for kb in get_kb_store().list_all() if kb.get("refresh_cron"))
+except Exception:
+    scheduled_kbs = 0
+
+sched_cols = st.columns(3)
+with sched_cols[0]:
+    with st.container(border=True):
+        st.markdown("🟢  **Running**" if scheduler_running else "🟡  **Not started**")
+        st.caption("Confluence auto-refresh polls every 5 min")
+with sched_cols[1]:
+    st.metric("Next poll", next_run)
+with sched_cols[2]:
+    st.metric("KBs with schedule", scheduled_kbs, help="Confluence KBs with a refresh_cron set")
+
 # ── .env hint ─────────────────────────────────────────────────────────────────
 with st.expander("How to change these settings"):
     st.markdown(
