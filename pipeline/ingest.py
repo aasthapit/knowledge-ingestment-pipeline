@@ -141,6 +141,9 @@ def ingest_document(
     kb_id: str | None = None,
     corpus_id: str | None = None,
     manifest_id: str | None = None,
+    chunk_strategy: str | None = None,
+    chunk_max_chars: int | None = None,
+    chunk_overlap_chars: int | None = None,
 ) -> dict:
     """
     Ingest any supported document format through the full pipeline.
@@ -192,11 +195,26 @@ def ingest_document(
             tags.append(t)
 
     # 3 — Chunk
-    chunks = chunker.chunk_docling(
-        converted,
-        tags=tags,
-        max_tokens=settings.docling_max_tokens,
-    )
+    effective_strategy = chunk_strategy or "heading"
+    effective_max_chars = chunk_max_chars or settings.chunk_max_chars
+    effective_overlap = chunk_overlap_chars or settings.chunk_overlap_chars
+
+    if effective_strategy == "character":
+        chunks = chunker.chunk_character(
+            converted.markdown,
+            source=str(source),
+            extra_tags=tags,
+            max_chars=effective_max_chars,
+            overlap=effective_overlap,
+        )
+        for c in chunks:
+            c.metadata["citation"] = citation.to_dict()
+    else:
+        chunks = chunker.chunk_docling(
+            converted,
+            tags=tags,
+            max_tokens=settings.docling_max_tokens,
+        )
 
     if not chunks:
         logger.warning("No chunks produced from '%s'.", source)
@@ -393,6 +411,8 @@ def query_vectorstore(
     top_k: int = 5,
     tag_filter: list[str] | None = None,
     source_type: str | None = None,
+    vs_id: str | None = None,
+    agent_filter: str | None = None,
 ) -> list[dict]:
     """
     Embed *question* and search whichever vector backend is configured.
@@ -405,21 +425,34 @@ def query_vectorstore(
     ----------
     tag_filter:   List of tag strings — at least one must match.
     source_type:  Restrict to a specific source type (e.g. ``"pdf"``).
+    vs_id:        Target vector store ID. Defaults to the built-in Redis.
+    agent_filter: Optional agent label for downstream filtering.
     """
     settings.validate()
     vectors = embedder.embed_texts([question])
     vec = vectors[0]
 
-    # Redis cosine distance: 0 = identical, ~[0,2] range
-    from pipeline import redis_store
-    redis_tag_filter = None
-    if tag_filter:
-        redis_tag_filter = "@tags:{" + "|".join(tag_filter) + "}"
-    results = redis_store.search(vec, top_k=top_k, tag_filter=redis_tag_filter)
+    all_tags = list(tag_filter or [])
+    if source_type:
+        all_tags.append(source_type)
+    redis_tag_filter = "@tags:{" + "|".join(all_tags) + "}" if all_tags else None
+
+    if vs_id:
+        from pipeline.mongo_store import get_vs_config_store
+        from pipeline.vector_store import get_vector_store_client
+        vs_config = get_vs_config_store().get(vs_id) or {}
+        client = get_vector_store_client(vs_config)
+        results = client.search(
+            vec, top_k=top_k, tag_filter=redis_tag_filter, agent_filter=agent_filter
+        )
+    else:
+        # Default: built-in Redis
+        from pipeline import redis_store
+        results = redis_store.search(vec, top_k=top_k, tag_filter=redis_tag_filter)
+
     for r in results:
         raw = float(r.get("score", 1.0))
         r["normalized_score"] = round(max(0.0, min(1.0, 1.0 - raw)), 4)
-        # Normalise tags from Redis string → list
         tags_raw = r.get("tags", "")
         if isinstance(tags_raw, str):
             r["tags"] = [t.strip() for t in tags_raw.split(",") if t.strip()]

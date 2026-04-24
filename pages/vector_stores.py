@@ -6,8 +6,8 @@ import streamlit as st
 st.title("🗄️ Vector Stores")
 st.caption(
     "Register vector DB targets. The built-in Redis instance is always available. "
-    "Add custom entries for any HTTP-compatible vector DB — each corpus can push to "
-    "a different store."
+    "Add custom entries for any HTTP-compatible vector DB, additional Redis instances, "
+    "or Tachyon — each corpus can push to a different store."
 )
 
 # ── Data loaders ──────────────────────────────────────────────────────────────
@@ -41,7 +41,7 @@ def _fmt_date(iso: str | None) -> str:
         return iso[:16] if iso else "—"
 
 
-TYPE_ICON = {"redis": "⚡", "custom": "🌐"}
+TYPE_ICON = {"redis": "⚡", "custom": "🌐", "tachyon": "🚀"}
 
 # ── Connection guard ──────────────────────────────────────────────────────────
 
@@ -78,18 +78,52 @@ with left:
     # ── Create form ───────────────────────────────────────────────────────────
     if st.session_state.vs_create_open:
         with st.form("create_vs_form", border=True):
-            st.markdown("**Add Custom Vector Store**")
-            new_name       = st.text_input("Name *", placeholder="e.g. prod-pinecone")
-            new_endpoint   = st.text_input(
-                "Base URL *",
-                placeholder="https://my-vector-db.example.com",
-                help="The pipeline will POST to {base_url}/upsert, /delete, /search.",
+            st.markdown("**Add Vector Store**")
+            new_name = st.text_input("Name *", placeholder="e.g. prod-redis-2")
+            new_type = st.radio(
+                "Type",
+                ["custom", "redis", "tachyon"],
+                horizontal=True,
+                format_func=lambda t: {"custom": "Custom HTTP", "redis": "Redis", "tachyon": "Tachyon"}[t],
             )
-            new_api_key    = st.text_input("API key", type="password")
+
+            # Fields shown for all types
+            new_endpoint = st.text_input(
+                "Base URL *" if new_type != "redis" else "Redis URL *",
+                placeholder=(
+                    "https://my-vector-db.example.com" if new_type == "custom"
+                    else "redis://localhost:6379" if new_type == "redis"
+                    else "https://tachyon.internal/api"
+                ),
+                help=(
+                    "The pipeline will POST to {base_url}/upsert, /delete, /search."
+                    if new_type == "custom" else
+                    "Redis connection URL for this instance."
+                    if new_type == "redis" else
+                    "Tachyon service base URL."
+                ),
+            )
+            new_api_key = st.text_input("API key / password", type="password")
             new_collection = st.text_input(
                 "Collection / index name",
                 placeholder="knowledge_index",
             )
+
+            # Redis-specific extra fields
+            new_key_prefix = ""
+            new_embedding_dims = 1536
+            if new_type == "redis":
+                new_key_prefix = st.text_input(
+                    "Key prefix",
+                    value="chunk:",
+                    help="Redis key prefix for stored chunk documents.",
+                )
+                new_embedding_dims = st.number_input(
+                    "Embedding dimensions",
+                    min_value=1,
+                    value=1536,
+                    help="Must match your embedding model output size.",
+                )
 
             submitted = st.form_submit_button("Add", type="primary")
             if submitted:
@@ -97,18 +131,30 @@ with left:
                 if not new_name.strip():
                     errors.append("Name is required.")
                 if not new_endpoint.strip():
-                    errors.append("Base URL is required.")
+                    errors.append(
+                        "Redis URL is required." if new_type == "redis"
+                        else "Base URL is required."
+                    )
                 for e in errors:
                     st.error(e)
                 if not errors:
                     try:
                         from pipeline.mongo_store import get_vs_config_store
+                        extra = {}
+                        if new_type == "redis":
+                            extra = {
+                                "redis_url": new_endpoint.strip(),
+                                "index_name": new_collection.strip() or "knowledge_index",
+                                "key_prefix": new_key_prefix.strip() or "chunk:",
+                                "embedding_dims": int(new_embedding_dims),
+                            }
                         vs_id = get_vs_config_store().create(
                             name=new_name.strip(),
-                            vs_type="custom",
-                            endpoint=new_endpoint.strip(),
-                            api_key=new_api_key.strip() or None,
-                            collection=new_collection.strip() or None,
+                            vs_type=new_type,
+                            endpoint=new_endpoint.strip() if new_type != "redis" else "",
+                            api_key=new_api_key.strip() or "",
+                            collection=new_collection.strip() or "",
+                            extra=extra or None,
                         )
                         _invalidate()
                         st.session_state.vs_selected = vs_id
@@ -201,12 +247,28 @@ with right:
                 m2.metric("Collection", vs["collection"])
             m3.metric("Created", _fmt_date(vs.get("created_at")))
 
-            if vs_type == "redis":
+            # ── Type-specific info ────────────────────────────────────────────
+            if vs_type == "redis" and is_def:
                 from pipeline.config import settings
                 st.info(
                     f"Connects to: `{settings.redis_url}` · index `{settings.redis_index_name}`\n\n"
                     "Configure via `REDIS_URL` and `REDIS_INDEX_NAME` in your `.env` file."
                 )
+            elif vs_type == "redis" and not is_def:
+                extra = vs.get("extra") or {}
+                st.info(
+                    f"Redis URL: `{extra.get('redis_url', '—')}`  \n"
+                    f"Index: `{extra.get('index_name', '—')}`  \n"
+                    f"Key prefix: `{extra.get('key_prefix', '—')}`  \n"
+                    f"Embedding dims: `{extra.get('embedding_dims', '—')}`"
+                )
+            elif vs_type == "tachyon":
+                st.info(
+                    "Tachyon handles its own embedding and indexing — the embedding step is "
+                    "skipped when pushing to this store. Implementation is pending Tachyon API finalisation."
+                )
+                if vs.get("endpoint"):
+                    st.code(vs["endpoint"], language=None)
             elif vs.get("endpoint"):
                 st.code(vs["endpoint"], language=None)
 
@@ -223,27 +285,57 @@ with right:
                     except Exception as exc:
                         st.error(f"Connection failed: {exc}")
 
-            # ── Edit form (custom only) ────────────────────────────────────────
+            # ── Edit form (non-default stores) ────────────────────────────────
             if not is_def:
                 st.divider()
                 with st.expander("Edit"):
                     with st.form(f"edit_vs_{sel_id}", border=False):
-                        e_endpoint   = st.text_input("Base URL", value=vs.get("endpoint", ""))
-                        e_api_key    = st.text_input("API key", value="", type="password",
-                                                     help="Leave blank to keep the current key.")
-                        e_collection = st.text_input("Collection", value=vs.get("collection", ""))
-                        saved = st.form_submit_button("Save", type="primary")
-                        if saved:
-                            try:
-                                from pipeline.mongo_store import get_vs_config_store
-                                get_vs_config_store().update(
-                                    sel_id,
-                                    endpoint=e_endpoint.strip() or None,
-                                    api_key=e_api_key.strip() or None,
-                                    collection=e_collection.strip() or None,
-                                )
-                                _invalidate()
-                                st.success("Updated.")
-                                st.rerun()
-                            except ValueError as exc:
-                                st.error(str(exc))
+                        if vs_type == "redis":
+                            extra = vs.get("extra") or {}
+                            e_redis_url = st.text_input("Redis URL", value=extra.get("redis_url", ""))
+                            e_index     = st.text_input("Index name", value=extra.get("index_name", ""))
+                            e_prefix    = st.text_input("Key prefix", value=extra.get("key_prefix", "chunk:"))
+                            e_dims      = st.number_input(
+                                "Embedding dimensions",
+                                min_value=1,
+                                value=int(extra.get("embedding_dims", 1536)),
+                            )
+                            saved = st.form_submit_button("Save", type="primary")
+                            if saved:
+                                try:
+                                    from pipeline.mongo_store import get_vs_config_store
+                                    get_vs_config_store().update(
+                                        sel_id,
+                                        collection=e_index.strip() or None,
+                                        extra={
+                                            "redis_url": e_redis_url.strip(),
+                                            "index_name": e_index.strip(),
+                                            "key_prefix": e_prefix.strip(),
+                                            "embedding_dims": int(e_dims),
+                                        },
+                                    )
+                                    _invalidate()
+                                    st.success("Updated.")
+                                    st.rerun()
+                                except ValueError as exc:
+                                    st.error(str(exc))
+                        else:
+                            e_endpoint   = st.text_input("Base URL", value=vs.get("endpoint", ""))
+                            e_api_key    = st.text_input("API key", value="", type="password",
+                                                         help="Leave blank to keep the current key.")
+                            e_collection = st.text_input("Collection", value=vs.get("collection", ""))
+                            saved = st.form_submit_button("Save", type="primary")
+                            if saved:
+                                try:
+                                    from pipeline.mongo_store import get_vs_config_store
+                                    get_vs_config_store().update(
+                                        sel_id,
+                                        endpoint=e_endpoint.strip() or None,
+                                        api_key=e_api_key.strip() or None,
+                                        collection=e_collection.strip() or None,
+                                    )
+                                    _invalidate()
+                                    st.success("Updated.")
+                                    st.rerun()
+                                except ValueError as exc:
+                                    st.error(str(exc))

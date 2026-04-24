@@ -44,6 +44,9 @@ class CreateKBRequest(BaseModel):
     refresh_cron: str | None = None
     file_name: str | None = None
     file_ref: str | None = None
+    chunk_strategy: str | None = None     # "heading" | "character" | None (global default)
+    chunk_max_chars: int | None = None
+    chunk_overlap_chars: int | None = None
 
 
 class UpdateKBRequest(BaseModel):
@@ -54,6 +57,9 @@ class UpdateKBRequest(BaseModel):
     refresh_cron: str | None = None
     file_name: str | None = None
     file_ref: str | None = None
+    chunk_strategy: str | None = None
+    chunk_max_chars: int | None = None
+    chunk_overlap_chars: int | None = None
 
 
 # ── Vector Store Config ────────────────────────────────────────────────────────
@@ -83,7 +89,7 @@ class CreateCorpusRequest(BaseModel):
     usecase_id: str = ""
     agent_filter: str = ""
     kb_ids: list[str] = []
-    vector_store_id: str = "default"
+    vector_store_id: str | None = None
 
 
 class UpdateCorpusRequest(BaseModel):
@@ -165,9 +171,10 @@ class SearchRequest(BaseModel):
     query: str
     top_k: int = Field(default=5, ge=1, le=20)
     tag_filter: list[str] = []
-    usecase_id: str | None = None
-    agent_filter: str | None = None
+    vs_id: str | None = None           # which vector store to query
+    agent_filter: str | None = None    # optional post-filter by agent
     source_type: str | None = None
+    usecase_id: str | None = None      # legacy: kept for backwards compat
 
 
 class SearchResult(BaseModel):

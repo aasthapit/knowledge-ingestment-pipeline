@@ -28,6 +28,9 @@ def create_kb(req: CreateKBRequest):
         refresh_cron=req.refresh_cron,
         file_name=req.file_name,
         file_ref=req.file_ref,
+        chunk_strategy=req.chunk_strategy,
+        chunk_max_chars=req.chunk_max_chars,
+        chunk_overlap_chars=req.chunk_overlap_chars,
     )
     return {"kb_id": kb_id, "message": "Knowledge Base created."}
 
@@ -54,6 +57,9 @@ def update_kb(kb_id: str, req: UpdateKBRequest):
         refresh_cron=req.refresh_cron,
         file_name=req.file_name,
         file_ref=req.file_ref,
+        chunk_strategy=req.chunk_strategy,
+        chunk_max_chars=req.chunk_max_chars,
+        chunk_overlap_chars=req.chunk_overlap_chars,
     )
     return {"message": "Knowledge Base updated."}
 

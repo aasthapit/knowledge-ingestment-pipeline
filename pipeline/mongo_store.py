@@ -1173,7 +1173,7 @@ class CorpusStore:
         usecase_id: str = "",
         agent_filter: str = "",
         kb_ids: list[str] | None = None,
-        vector_store_id: str = "default",
+        vector_store_id: str | None = None,
     ) -> str:
         """Create a new corpus and return its corpus_id."""
         now = datetime.now(timezone.utc)
@@ -1357,6 +1357,9 @@ class KnowledgeBaseStore:
         refresh_cron: str | None = None,
         file_name: str | None = None,
         file_ref: str | None = None,
+        chunk_strategy: str | None = None,
+        chunk_max_chars: int | None = None,
+        chunk_overlap_chars: int | None = None,
     ) -> str:
         """Create a new KB and return its kb_id."""
         if source_type not in ("confluence", "jsonl", "web"):
@@ -1364,20 +1367,23 @@ class KnowledgeBaseStore:
         now = datetime.now(timezone.utc)
         kb_id = str(uuid.uuid4())
         self._coll.insert_one({
-            "_id":             kb_id,
-            "name":            name,
-            "description":     description,
-            "source_type":     source_type,
-            "confluence_urls": confluence_urls or [],
-            "max_depth":       max_depth,
-            "refresh_cron":    refresh_cron,
-            "file_name":       file_name or "",
-            "file_ref":        file_ref or "",
-            "doc_ids":         [],
-            "status":          "empty",
-            "created_at":      now,
-            "last_updated":    now,
-            "last_ingested_at": None,
+            "_id":                 kb_id,
+            "name":                name,
+            "description":         description,
+            "source_type":         source_type,
+            "confluence_urls":     confluence_urls or [],
+            "max_depth":           max_depth,
+            "refresh_cron":        refresh_cron,
+            "file_name":           file_name or "",
+            "file_ref":            file_ref or "",
+            "doc_ids":             [],
+            "status":              "empty",
+            "chunk_strategy":      chunk_strategy,
+            "chunk_max_chars":     chunk_max_chars,
+            "chunk_overlap_chars": chunk_overlap_chars,
+            "created_at":          now,
+            "last_updated":        now,
+            "last_ingested_at":    None,
         })
         return kb_id
 
@@ -1391,6 +1397,9 @@ class KnowledgeBaseStore:
         refresh_cron: str | None = None,
         file_name: str | None = None,
         file_ref: str | None = None,
+        chunk_strategy: str | None = None,
+        chunk_max_chars: int | None = None,
+        chunk_overlap_chars: int | None = None,
     ) -> None:
         fields: dict[str, Any] = {"last_updated": datetime.now(timezone.utc)}
         if name is not None:
@@ -1407,6 +1416,12 @@ class KnowledgeBaseStore:
             fields["file_name"] = file_name
         if file_ref is not None:
             fields["file_ref"] = file_ref
+        if chunk_strategy is not None:
+            fields["chunk_strategy"] = chunk_strategy
+        if chunk_max_chars is not None:
+            fields["chunk_max_chars"] = chunk_max_chars
+        if chunk_overlap_chars is not None:
+            fields["chunk_overlap_chars"] = chunk_overlap_chars
         self._coll.update_one({"_id": kb_id}, {"$set": fields})
 
     def add_doc_ids(self, kb_id: str, doc_ids: list[str]) -> None:
@@ -1524,8 +1539,8 @@ class VectorStoreConfigStore:
         collection: str = "",
         extra: dict | None = None,
     ) -> str:
-        if vs_type not in ("redis", "custom"):
-            raise ValueError(f"vs_type must be 'redis' or 'custom', got {vs_type!r}")
+        if vs_type not in ("redis", "custom", "tachyon"):
+            raise ValueError(f"vs_type must be 'redis', 'custom', or 'tachyon', got {vs_type!r}")
         now = datetime.now(timezone.utc)
         vs_id = str(uuid.uuid4())
         self._coll.insert_one({
@@ -1582,7 +1597,9 @@ class VectorStoreConfigStore:
 
     @staticmethod
     def _serialize(doc: dict[str, Any]) -> dict[str, Any]:
-        doc["vs_id"] = doc.pop("_id", None)
+        vs_id = doc.pop("_id", None)
+        doc["vs_id"] = vs_id
+        doc["is_default"] = (vs_id == VectorStoreConfigStore._DEFAULT_ID)
         created_at = doc.get("created_at")
         if isinstance(created_at, datetime):
             doc["created_at"] = created_at.isoformat()

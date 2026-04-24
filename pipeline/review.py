@@ -212,10 +212,16 @@ def push_approved(
     usecase_id   = corpus.get("usecase_id") or None
     agent_filter = corpus.get("agent_filter") or None
     kb_ids       = corpus.get("kb_ids") or []
-    vs_id        = corpus.get("vector_store_id") or "default"
+    vs_id        = corpus.get("vector_store_id") or None
 
-    vs_config = vs_store.get(vs_id) or vs_store.get("default")
-    vector_client = get_vector_store_client(vs_config or {})
+    vs_config = vs_store.get(vs_id) if vs_id else None
+    if not vs_config:
+        return {
+            "pushed_docs": 0, "pushed_chunks": 0,
+            "errors": ["No vector store configured for this corpus. Assign one before pushing."],
+        }
+    vector_client = get_vector_store_client(vs_config)
+    skip_embedding = getattr(vector_client, "handles_own_embedding", False)
 
     # Decide which docs to push
     if doc_id:
@@ -270,16 +276,19 @@ def push_approved(
                 chunks.append(c)
                 precomputed.append(cd.get("_embedding"))
 
-            needs_embed = [i for i, v in enumerate(precomputed) if v is None]
-            if needs_embed:
-                logger.info("Embedding %d/%d chunks for doc %s …", len(needs_embed), len(chunks), did)
-                sub_vectors = embedder.embed_chunks([chunks[i] for i in needs_embed])
-                for idx, vec in zip(needs_embed, sub_vectors):
-                    precomputed[idx] = vec
+            if skip_embedding:
+                logger.info("Skipping embedding for doc %s — backend handles its own vectorization.", did)
+                vectors = [[] for _ in chunks]
             else:
-                logger.info("Reusing %d pre-computed embeddings for doc %s.", len(chunks), did)
-
-            vectors = [v for v in precomputed]  # type: ignore[assignment]
+                needs_embed = [i for i, v in enumerate(precomputed) if v is None]
+                if needs_embed:
+                    logger.info("Embedding %d/%d chunks for doc %s …", len(needs_embed), len(chunks), did)
+                    sub_vectors = embedder.embed_chunks([chunks[i] for i in needs_embed])
+                    for idx, vec in zip(needs_embed, sub_vectors):
+                        precomputed[idx] = vec
+                else:
+                    logger.info("Reusing %d pre-computed embeddings for doc %s.", len(chunks), did)
+                vectors = [v for v in precomputed]  # type: ignore[assignment]
 
             doc_meta = staging.get_doc_meta(did) or {}
             try:

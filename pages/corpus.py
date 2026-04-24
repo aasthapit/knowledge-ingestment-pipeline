@@ -122,13 +122,15 @@ with left:
 
             submitted = st.form_submit_button("Create", type="primary")
             if submitted:
+                vs_id = vs_options.get(selected_vs_name) if selected_vs_name != "(none)" else None
                 if not new_name.strip():
                     st.error("Name is required.")
+                elif vs_id is None:
+                    st.error("A vector store is required. Add one on the Vector Stores page first.")
                 else:
                     try:
                         from pipeline.mongo_store import get_corpus_store
                         kb_ids = [kb_options[n] for n in selected_kb_names]
-                        vs_id  = vs_options.get(selected_vs_name) if selected_vs_name != "(none)" else None
                         cid = get_corpus_store().create(
                             name=new_name.strip(),
                             description=new_desc.strip(),
@@ -260,17 +262,20 @@ with right:
                     )
                     saved = st.form_submit_button("Save", type="primary")
                     if saved:
-                        from pipeline.mongo_store import get_corpus_store
-                        new_kb_ids = [kb_opts[n] for n in e_kbs]
-                        new_vs_id  = vs_opts.get(e_vs) if e_vs != "(none)" else None
-                        get_corpus_store().update(
-                            corpus_id=sel_id,
-                            description=e_desc.strip() or None,
-                            usecase_id=e_uc.strip() or None,
-                            agent_filter=e_af.strip() or None,
-                            kb_ids=new_kb_ids,
-                            vector_store_id=new_vs_id,
-                        )
+                        new_vs_id = vs_opts.get(e_vs) if e_vs != "(none)" else None
+                        if new_vs_id is None:
+                            st.error("A vector store is required.")
+                        else:
+                            from pipeline.mongo_store import get_corpus_store
+                            new_kb_ids = [kb_opts[n] for n in e_kbs]
+                            get_corpus_store().update(
+                                corpus_id=sel_id,
+                                description=e_desc.strip() or None,
+                                usecase_id=e_uc.strip() or None,
+                                agent_filter=e_af.strip() or None,
+                                kb_ids=new_kb_ids,
+                                vector_store_id=new_vs_id,
+                            )
                         _invalidate(sel_id)
                         st.session_state.corpus_edit_open = False
                         st.success("Corpus updated.")

@@ -58,6 +58,8 @@ if "kb_selected" not in st.session_state:
     st.session_state.kb_selected = None
 if "kb_create_open" not in st.session_state:
     st.session_state.kb_create_open = False
+if "kb_edit_open" not in st.session_state:
+    st.session_state.kb_edit_open = False
 
 # ── Layout ────────────────────────────────────────────────────────────────────
 
@@ -173,6 +175,7 @@ with left:
             btn_type = "primary" if st.session_state.kb_selected == kid else "secondary"
             if st.button(label, key=f"sel_kb_{kid}", use_container_width=True, type=btn_type):
                 st.session_state.kb_selected = kid
+                st.session_state.kb_edit_open = False
                 st.rerun()
 
 # =============================================================================
@@ -196,13 +199,16 @@ with right:
             st.session_state.kb_selected = None
         else:
             # ── Header ────────────────────────────────────────────────────────
-            hd1, hd2 = st.columns([3, 1])
+            hd1, hd2, hd3 = st.columns([3, 1, 1])
             with hd1:
                 icon = SOURCE_ICON.get(kb.get("source_type", ""), "📂")
                 st.subheader(f"{icon} {kb['name']}")
                 if kb.get("description"):
                     st.caption(kb["description"])
             with hd2:
+                if st.button("Edit", use_container_width=True):
+                    st.session_state.kb_edit_open = not st.session_state.kb_edit_open
+            with hd3:
                 if st.button("Delete", use_container_width=True, type="secondary"):
                     st.session_state[f"confirm_del_kb_{sel_id}"] = True
 
@@ -224,6 +230,97 @@ with right:
                     if st.button("Cancel", key="confirm_del_kb_no"):
                         st.session_state[f"confirm_del_kb_{sel_id}"] = False
                         st.rerun()
+
+            # ── Edit form ─────────────────────────────────────────────────────
+            if st.session_state.kb_edit_open:
+                source_type_kb = kb.get("source_type", "")
+                with st.form("edit_kb_form", border=True):
+                    st.markdown("**Edit Knowledge Base**")
+                    e_name = st.text_input("Name *", value=kb.get("name", ""))
+                    e_desc = st.text_area("Description", value=kb.get("description", ""), height=60)
+
+                    if source_type_kb == "confluence":
+                        e_urls = st.text_area(
+                            "Confluence URLs (one per line)",
+                            value="\n".join(kb.get("confluence_urls") or []),
+                            height=80,
+                        )
+                        e_depth = st.number_input("Max depth (-1 = all)", min_value=-1, value=kb.get("max_depth", -1))
+                        e_cron  = st.text_input("Refresh schedule (cron)", value=kb.get("refresh_cron") or "")
+                    elif source_type_kb == "web":
+                        e_urls = st.text_area(
+                            "Seed URLs (one per line)",
+                            value="\n".join(kb.get("confluence_urls") or []),
+                            height=80,
+                            help="Stored for reference — run your crawler externally.",
+                        )
+                        e_depth = None
+                        e_cron  = None
+                    elif source_type_kb == "jsonl":
+                        e_file_name = st.text_input("File name", value=kb.get("file_name", ""))
+                        e_urls = None
+                        e_depth = None
+                        e_cron  = None
+                    else:
+                        e_urls = None
+                        e_depth = None
+                        e_cron  = None
+
+                    with st.expander("Chunking config"):
+                        current_strategy = kb.get("chunk_strategy") or "Global default"
+                        strategy_options = ["Global default", "heading", "character"]
+                        e_strategy = st.radio(
+                            "Chunk strategy",
+                            strategy_options,
+                            index=strategy_options.index(current_strategy) if current_strategy in strategy_options else 0,
+                            horizontal=True,
+                            help="'Global default' uses the server-wide settings. 'character' splits purely by size with overlap.",
+                        )
+                        e_max_chars = st.number_input(
+                            "Max chars per chunk (0 = global default)",
+                            min_value=0,
+                            value=kb.get("chunk_max_chars") or 0,
+                            help="Override global chunk_max_chars for this KB.",
+                        )
+                        e_overlap = st.number_input(
+                            "Overlap chars (0 = global default)",
+                            min_value=0,
+                            value=kb.get("chunk_overlap_chars") or 0,
+                            help="Override global chunk_overlap_chars for this KB.",
+                        )
+
+                    saved = st.form_submit_button("Save", type="primary")
+                    if saved:
+                        if not e_name.strip():
+                            st.error("Name is required.")
+                        else:
+                            try:
+                                from pipeline.mongo_store import get_kb_store
+                                update_kwargs: dict = {
+                                    "name": e_name.strip(),
+                                    "description": e_desc.strip(),
+                                    "chunk_strategy": None if e_strategy == "Global default" else e_strategy,
+                                    "chunk_max_chars": int(e_max_chars) if e_max_chars else None,
+                                    "chunk_overlap_chars": int(e_overlap) if e_overlap else None,
+                                }
+                                if source_type_kb == "confluence" and e_urls is not None:
+                                    update_kwargs["confluence_urls"] = [u.strip() for u in e_urls.splitlines() if u.strip()]
+                                    update_kwargs["max_depth"] = int(e_depth)
+                                    update_kwargs["refresh_cron"] = e_cron.strip() or None
+                                elif source_type_kb == "web" and e_urls is not None:
+                                    update_kwargs["confluence_urls"] = [u.strip() for u in e_urls.splitlines() if u.strip()]
+                                elif source_type_kb == "jsonl":
+                                    update_kwargs["file_name"] = e_file_name.strip()
+                                get_kb_store().update(sel_id, **update_kwargs)
+                                _invalidate()
+                                st.session_state.kb_edit_open = False
+                                st.success("Knowledge Base updated.")
+                                st.rerun()
+                            except Exception as exc:
+                                if "duplicate" in str(exc).lower() or "E11000" in str(exc):
+                                    st.error(f"Name **{e_name.strip()}** already exists.")
+                                else:
+                                    st.error(str(exc))
 
             # ── Stats chips ───────────────────────────────────────────────────
             status     = kb.get("status", "empty")

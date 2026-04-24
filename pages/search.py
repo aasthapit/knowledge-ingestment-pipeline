@@ -32,7 +32,6 @@ def _source_display(result: dict) -> str:
     else:
         path = cit.get("source_path") or result.get("source", "")
         if path:
-            # Show just the filename, not the full path
             from pathlib import Path as _P
             parts.append(f"`{_P(path).name}`")
 
@@ -48,33 +47,32 @@ def _source_display(result: dict) -> str:
 st.title("🔎 Search Knowledge Base")
 st.caption("Ask a question in plain language — the knowledge base will find the most relevant sections.")
 
-# ── Use case filter ───────────────────────────────────────────────────────────
-uc_options = ["All use cases"]
-ag_options_map: dict[str, list[str]] = {}
+# ── Vector store + agent filter ───────────────────────────────────────────────
+
+stores: list[dict] = []
 try:
-    from pipeline.mongo_store import get_usecase_ledger
-    _uc_ledger = get_usecase_ledger()
-    uc_options += _uc_ledger.get_distinct_usecases()
-    for _uc in uc_options[1:]:
-        ag_options_map[_uc] = _uc_ledger.get_agent_filters_for_usecase(_uc)
+    from pipeline.mongo_store import get_vs_config_store
+    stores = get_vs_config_store().list_all()
 except Exception:
     pass
 
+vs_options: dict[str, str] = {vs["name"]: vs["vs_id"] for vs in stores}
+
 uc_cols = st.columns([2, 2, 1])
 with uc_cols[0]:
-    selected_usecase = st.selectbox(
-        "Use case",
-        uc_options,
-        help="Filter results to chunks belonging to a specific use case.",
+    selected_vs_name = st.selectbox(
+        "Vector Store",
+        options=list(vs_options.keys()) or ["(none)"],
+        help="Which vector store to search.",
     )
 with uc_cols[1]:
-    ag_options = ["All agents"] + ag_options_map.get(selected_usecase, [])
-    selected_agent = st.selectbox(
-        "Agent",
-        ag_options,
-        help="Narrow results to a specific agent persona.",
-        disabled=(selected_usecase == "All use cases"),
+    agent_filter_input = st.text_input(
+        "Agent filter  *(optional)*",
+        placeholder="e.g. support-agent-v1",
+        help="Narrow results to chunks pushed for a specific agent.",
     )
+
+selected_vs_id = vs_options.get(selected_vs_name) if selected_vs_name != "(none)" else None
 
 # ── Search form ───────────────────────────────────────────────────────────────
 with st.form("search_form", border=False):
@@ -111,43 +109,21 @@ if submitted:
         st.warning("Please enter a question to search.")
         st.stop()
 
+    if selected_vs_id is None and not stores:
+        st.warning("No vector stores configured. Add one on the Vector Stores page first.")
+        st.stop()
+
     with st.spinner("Searching…"):
         try:
-            # Resolve allowed chunk_ids for use case filtering
-            uc_chunk_ids: set[str] | None = None
-            if selected_usecase != "All use cases":
-                try:
-                    from pipeline.mongo_store import get_usecase_ledger as _get_ucl
-                    _agent = None if selected_agent == "All agents" else selected_agent
-                    if _agent:
-                        uc_chunk_ids = set(
-                            _get_ucl().get_chunk_ids(selected_usecase, _agent)
-                        )
-                    else:
-                        # Union of all agents for this use case
-                        _ids: list[str] = []
-                        for _ag in ag_options_map.get(selected_usecase, []):
-                            _ids.extend(_get_ucl().get_chunk_ids(selected_usecase, _ag))
-                        uc_chunk_ids = set(_ids)
-                except Exception:
-                    uc_chunk_ids = None
-
-            # Over-fetch when filtering so we hit the target top_k after filtering
-            fetch_k = top_k * 5 if uc_chunk_ids is not None else top_k
-
             from pipeline.ingest import query_vectorstore
             results = query_vectorstore(
                 question=query.strip(),
-                top_k=fetch_k,
+                top_k=top_k,
                 tag_filter=tag_filter,
                 source_type=None if source_type == "All types" else source_type,
+                vs_id=selected_vs_id,
+                agent_filter=agent_filter_input.strip() or None,
             )
-
-            # Post-retrieval use case filter
-            if uc_chunk_ids is not None:
-                results = [r for r in results if r.get("chunk_id") in uc_chunk_ids]
-                results = results[:top_k]
-
         except Exception as exc:
             st.error(f"Search failed: {exc}")
             st.stop()
@@ -175,7 +151,6 @@ if submitted:
             hdr_left, hdr_right = st.columns([4, 1])
             with hdr_left:
                 if section:
-                    # Bold the last part of the breadcrumb (the section name)
                     parts = [p.strip() for p in section.split(">")]
                     if len(parts) > 1:
                         crumb = " › ".join(parts[:-1])

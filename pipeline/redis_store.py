@@ -31,33 +31,183 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Schema
+# Parameterized Redis client — supports multiple independent Redis instances
 # ---------------------------------------------------------------------------
 
-def _index_schema() -> list:
-    dims = settings.embedding_dimensions
-    return [
-        TextField("$.source",  as_name="source",  no_stem=True),
-        TextField("$.title",   as_name="title"),
-        TextField("$.section", as_name="section"),
-        TextField("$.content", as_name="content"),
-        TagField( "$.tags.*",  as_name="tags"),
-        NumericField("$.metadata.ingested_at", as_name="ingested_at", sortable=True),
-        VectorField(
-            "$.embedding",
-            "FLAT",
-            {
-                "TYPE": "FLOAT32",
-                "DIM": dims,
-                "DISTANCE_METRIC": "COSINE",
-            },
-            as_name="embedding",
-        ),
-    ]
+class RedisClient:
+    """
+    Wraps a single Redis vector index with its own connection params.
+
+    Use the module-level helper functions for the default instance (env-var
+    driven). Instantiate directly when you need a second Redis target.
+    """
+
+    def __init__(
+        self,
+        url: str,
+        index_name: str,
+        key_prefix: str,
+        embedding_dims: int,
+    ) -> None:
+        self.url = url
+        self.index_name = index_name
+        self.key_prefix = key_prefix
+        self.embedding_dims = embedding_dims
+        self._conn: redis.Redis | None = None
+
+    def _get_conn(self) -> redis.Redis:
+        if self._conn is None:
+            self._conn = redis.from_url(self.url, decode_responses=False)
+        return self._conn
+
+    def _index_schema(self) -> list:
+        return [
+            TextField("$.source",  as_name="source",  no_stem=True),
+            TextField("$.title",   as_name="title"),
+            TextField("$.section", as_name="section"),
+            TextField("$.content", as_name="content"),
+            TagField( "$.tags.*",  as_name="tags"),
+            NumericField("$.metadata.ingested_at", as_name="ingested_at", sortable=True),
+            VectorField(
+                "$.embedding",
+                "FLAT",
+                {
+                    "TYPE": "FLOAT32",
+                    "DIM": self.embedding_dims,
+                    "DISTANCE_METRIC": "COSINE",
+                },
+                as_name="embedding",
+            ),
+        ]
+
+    def create_index(self) -> None:
+        """Create the RediSearch index if it does not already exist."""
+        conn = self._get_conn()
+        try:
+            conn.ft(self.index_name).info()
+            logger.info("Index '%s' already exists — skipping creation.", self.index_name)
+        except redis.ResponseError:
+            logger.info("Creating index '%s' …", self.index_name)
+            conn.ft(self.index_name).create_index(
+                fields=self._index_schema(),
+                definition=IndexDefinition(
+                    prefix=[self.key_prefix],
+                    index_type=IndexType.JSON,
+                ),
+            )
+            logger.info("Index created.")
+
+    def drop_index(self, delete_docs: bool = False) -> None:
+        """Drop the RediSearch index."""
+        try:
+            self._get_conn().ft(self.index_name).dropindex(delete_documents=delete_docs)
+            logger.info("Index '%s' dropped.", self.index_name)
+        except redis.ResponseError as exc:
+            logger.warning("Could not drop index: %s", exc)
+
+    def upsert_chunks(
+        self,
+        chunks: list["Chunk"],
+        embeddings: list[list[float]],
+    ) -> None:
+        """Store each chunk + its embedding as a JSON document in Redis."""
+        import time
+
+        conn = self._get_conn()
+        pipe = conn.pipeline(transaction=False)
+        ts = int(time.time())
+
+        for chunk, vector in zip(chunks, embeddings):
+            key = f"{self.key_prefix}{chunk.chunk_id}"
+            doc = chunk.to_dict()
+            doc["embedding"] = vector
+            doc["metadata"]["ingested_at"] = ts
+            pipe.json().set(key, "$", doc)
+
+        pipe.execute()
+        logger.info("Upserted %d chunks into Redis (%s).", len(chunks), self.index_name)
+
+    def search(
+        self,
+        query_vector: list[float],
+        top_k: int = 5,
+        tag_filter: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """KNN vector search with optional tag pre-filter."""
+        conn = self._get_conn()
+        dims = len(query_vector)
+        blob = struct.pack(f"{dims}f", *query_vector)
+
+        base_filter = tag_filter if tag_filter else "*"
+        q_str = f"({base_filter})=>[KNN {top_k} @embedding $vec AS score]"
+
+        q = (
+            Query(q_str)
+            .sort_by("score")
+            .return_fields("source", "title", "section", "content", "tags", "score")
+            .dialect(2)
+            .paging(0, top_k)
+        )
+
+        results = conn.ft(self.index_name).search(q, query_params={"vec": blob})
+
+        output = []
+        for doc in results.docs:
+            output.append(
+                {
+                    "chunk_id": doc.id.removeprefix(self.key_prefix),
+                    "source": getattr(doc, "source", ""),
+                    "title": getattr(doc, "title", ""),
+                    "section": getattr(doc, "section", ""),
+                    "content": getattr(doc, "content", ""),
+                    "tags": getattr(doc, "tags", ""),
+                    "score": float(getattr(doc, "score", 0)),
+                }
+            )
+        return output
+
+    def get_chunk(self, chunk_id: str) -> dict[str, Any] | None:
+        """Retrieve a single chunk by its ID."""
+        key = f"{self.key_prefix}{chunk_id}"
+        return self._get_conn().json().get(key)
+
+    def delete_chunks(self, chunk_ids: list[str]) -> int:
+        """Delete chunks by ID. Returns the number of keys actually deleted."""
+        if not chunk_ids:
+            return 0
+        keys = [f"{self.key_prefix}{cid}" for cid in chunk_ids]
+        deleted = self._get_conn().delete(*keys)
+        logger.info("Deleted %d/%d chunks from Redis (%s).", deleted, len(chunk_ids), self.index_name)
+        return deleted
+
+    def update_tags(self, chunk_id: str, tags: list[str]) -> None:
+        """Overwrite the tags on an existing chunk."""
+        key = f"{self.key_prefix}{chunk_id}"
+        self._get_conn().json().set(key, "$.tags", tags)
+        logger.debug("Updated tags for %s → %s", chunk_id, tags)
 
 
 # ---------------------------------------------------------------------------
-# Client factory
+# Default instance (lazy singleton driven by env vars / settings)
+# ---------------------------------------------------------------------------
+
+_default: RedisClient | None = None
+
+
+def _get_default() -> RedisClient:
+    global _default
+    if _default is None:
+        _default = RedisClient(
+            url=settings.redis_url,
+            index_name=settings.redis_index_name,
+            key_prefix=settings.redis_key_prefix,
+            embedding_dims=settings.embedding_dimensions,
+        )
+    return _default
+
+
+# ---------------------------------------------------------------------------
+# Client factory (plain redis.Redis — used by StagingStore)
 # ---------------------------------------------------------------------------
 
 def get_client() -> redis.Redis:
@@ -65,41 +215,18 @@ def get_client() -> redis.Redis:
 
 
 # ---------------------------------------------------------------------------
-# Index management
+# Module-level wrappers — preserve backwards compatibility
 # ---------------------------------------------------------------------------
 
 def create_index(client: redis.Redis | None = None) -> None:
     """Create the RediSearch index if it does not already exist."""
-    client = client or get_client()
-    index_name = settings.redis_index_name
-    try:
-        client.ft(index_name).info()
-        logger.info("Index '%s' already exists — skipping creation.", index_name)
-    except redis.ResponseError:
-        logger.info("Creating index '%s' …", index_name)
-        client.ft(index_name).create_index(
-            fields=_index_schema(),
-            definition=IndexDefinition(
-                prefix=[settings.redis_key_prefix],
-                index_type=IndexType.JSON,
-            ),
-        )
-        logger.info("Index created.")
+    _get_default().create_index()
 
 
 def drop_index(client: redis.Redis | None = None, delete_docs: bool = False) -> None:
     """Drop the RediSearch index (optionally also delete all indexed documents)."""
-    client = client or get_client()
-    try:
-        client.ft(settings.redis_index_name).dropindex(delete_documents=delete_docs)
-        logger.info("Index '%s' dropped.", settings.redis_index_name)
-    except redis.ResponseError as exc:
-        logger.warning("Could not drop index: %s", exc)
+    _get_default().drop_index(delete_docs=delete_docs)
 
-
-# ---------------------------------------------------------------------------
-# Upsert
-# ---------------------------------------------------------------------------
 
 def _pack_embedding(vector: list[float]) -> bytes:
     return struct.pack(f"{len(vector)}f", *vector)
@@ -110,36 +237,19 @@ def upsert_chunks(
     embeddings: list[list[float]],
     client: redis.Redis | None = None,
 ) -> None:
-    """
-    Store each chunk + its embedding as a JSON document in Redis.
-    Uses the chunk_id as the document key.
-    """
-    import time
+    """Store each chunk + its embedding as a JSON document in Redis."""
+    _get_default().upsert_chunks(chunks, embeddings)
 
-    client = client or get_client()
-    pipe = client.pipeline(transaction=False)
-    ts = int(time.time())
-
-    for chunk, vector in zip(chunks, embeddings):
-        key = f"{settings.redis_key_prefix}{chunk.chunk_id}"
-        doc = chunk.to_dict()
-        doc["embedding"] = vector          # stored as JSON array for RedisJSON
-        doc["metadata"]["ingested_at"] = ts
-        pipe.json().set(key, "$", doc)
-
-    pipe.execute()
-    logger.info("Upserted %d chunks into Redis.", len(chunks))
-
-
-# ---------------------------------------------------------------------------
-# Query / retrieval
-# ---------------------------------------------------------------------------
 
 def search(
     query_vector: list[float],
     top_k: int = 5,
     tag_filter: str | None = None,
     client: redis.Redis | None = None,
+    # legacy params kept for call-site compat (ignored in Redis path)
+    usecase_id: str | None = None,
+    agent_filter: str | None = None,
+    source_type: str | None = None,
 ) -> list[dict[str, Any]]:
     """
     KNN vector search with optional tag pre-filter.
@@ -150,62 +260,20 @@ def search(
     top_k:        Number of results to return.
     tag_filter:   RediSearch tag filter string, e.g. ``"@tags:{python|redis}"``.
     """
-    client = client or get_client()
-    dims = len(query_vector)
-    blob = struct.pack(f"{dims}f", *query_vector)
-
-    base_filter = tag_filter if tag_filter else "*"
-    q_str = f"({base_filter})=>[KNN {top_k} @embedding $vec AS score]"
-
-    q = (
-        Query(q_str)
-        .sort_by("score")
-        .return_fields("source", "title", "section", "content", "tags", "score")
-        .dialect(2)
-        .paging(0, top_k)
-    )
-
-    results = client.ft(settings.redis_index_name).search(q, query_params={"vec": blob})
-
-    output = []
-    for doc in results.docs:
-        output.append(
-            {
-                "chunk_id": doc.id.removeprefix(settings.redis_key_prefix),
-                "source": getattr(doc, "source", ""),
-                "title": getattr(doc, "title", ""),
-                "section": getattr(doc, "section", ""),
-                "content": getattr(doc, "content", ""),
-                "tags": getattr(doc, "tags", ""),
-                "score": float(getattr(doc, "score", 0)),
-            }
-        )
-    return output
+    return _get_default().search(query_vector, top_k=top_k, tag_filter=tag_filter)
 
 
 def get_chunk(chunk_id: str, client: redis.Redis | None = None) -> dict[str, Any] | None:
     """Retrieve a single chunk by its ID."""
-    client = client or get_client()
-    key = f"{settings.redis_key_prefix}{chunk_id}"
-    raw = client.json().get(key)
-    return raw
+    return _get_default().get_chunk(chunk_id)
 
 
 def delete_chunks(
     chunk_ids: list[str],
     client: redis.Redis | None = None,
 ) -> int:
-    """
-    Delete chunks from Redis by their chunk_ids.
-    Returns the number of keys actually deleted.
-    """
-    if not chunk_ids:
-        return 0
-    client = client or get_client()
-    keys = [f"{settings.redis_key_prefix}{cid}" for cid in chunk_ids]
-    deleted = client.delete(*keys)
-    logger.info("Deleted %d/%d chunks from Redis.", deleted, len(chunk_ids))
-    return deleted
+    """Delete chunks from Redis by their chunk_ids. Returns number deleted."""
+    return _get_default().delete_chunks(chunk_ids)
 
 
 def update_tags(
@@ -214,10 +282,7 @@ def update_tags(
     client: redis.Redis | None = None,
 ) -> None:
     """Overwrite the tags on an existing chunk."""
-    client = client or get_client()
-    key = f"{settings.redis_key_prefix}{chunk_id}"
-    client.json().set(key, "$.tags", tags)
-    logger.debug("Updated tags for %s → %s", chunk_id, tags)
+    _get_default().update_tags(chunk_id, tags)
 
 
 # ---------------------------------------------------------------------------

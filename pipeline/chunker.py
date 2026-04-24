@@ -211,6 +211,42 @@ def chunk_markdown(
     return chunks
 
 
+def chunk_character(
+    text: str,
+    source: str,
+    extra_tags: list[str] | None = None,
+    max_chars: int = 2000,
+    overlap: int = 200,
+) -> list[Chunk]:
+    """
+    Pure character sliding-window chunker — no heading detection.
+
+    Splits *text* into overlapping windows of *max_chars* characters.
+    Use when documents lack heading structure or when explicit size control
+    is preferred over semantic splitting.
+    """
+    extra_tags = extra_tags or []
+    title = Path(source).stem
+    parts = _split_large_chunk(text.strip(), max_chars, overlap)
+    n = len(parts)
+    chunks: list[Chunk] = []
+    for idx, part in enumerate(parts):
+        part = part.strip()
+        if not part:
+            continue
+        section = f"{title} [{idx + 1}/{n}]" if n > 1 else title
+        chunks.append(
+            Chunk(
+                source=source,
+                title=title,
+                section=section,
+                content=part,
+                tags=list(extra_tags),
+            )
+        )
+    return chunks
+
+
 def chunk_markdown_file(
     path: str | Path,
     extra_tags: list[str] | None = None,

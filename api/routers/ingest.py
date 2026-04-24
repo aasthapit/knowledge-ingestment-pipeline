@@ -22,6 +22,19 @@ async def ingest_document(
 
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
 
+    # Resolve per-KB chunking config if a KB is specified
+    chunk_strategy = chunk_max_chars = chunk_overlap_chars = None
+    if kb_id:
+        try:
+            from pipeline.mongo_store import get_kb_store
+            kb = get_kb_store().get(kb_id)
+            if kb:
+                chunk_strategy = kb.get("chunk_strategy")
+                chunk_max_chars = kb.get("chunk_max_chars")
+                chunk_overlap_chars = kb.get("chunk_overlap_chars")
+        except Exception:
+            pass
+
     if file:
         suffix = os.path.splitext(file.filename or "upload")[1] or ".bin"
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
@@ -34,6 +47,9 @@ async def ingest_document(
                 auto_push=auto_push,
                 kb_id=kb_id,
                 corpus_id=corpus_id,
+                chunk_strategy=chunk_strategy,
+                chunk_max_chars=chunk_max_chars,
+                chunk_overlap_chars=chunk_overlap_chars,
             )
         finally:
             os.unlink(tmp_path)
@@ -44,6 +60,9 @@ async def ingest_document(
             auto_push=auto_push,
             kb_id=kb_id,
             corpus_id=corpus_id,
+            chunk_strategy=chunk_strategy,
+            chunk_max_chars=chunk_max_chars,
+            chunk_overlap_chars=chunk_overlap_chars,
         )
     else:
         raise HTTPException(status_code=400, detail="Provide either a file or a url")

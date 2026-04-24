@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from api.models import SearchRequest, SearchResult
 import sys, os
 
@@ -9,20 +9,46 @@ router = APIRouter()
 
 @router.post("/", response_model=list[SearchResult])
 def search(req: SearchRequest):
-    from pipeline.ingest import query_vectorstore
-    from pipeline.mongo_store import get_usecase_ledger
+    from pipeline import embedder
+    from pipeline.mongo_store import get_vs_config_store
+    from pipeline.vector_store import get_vector_store_client
+
+    vectors = embedder.embed_texts([req.query])
+    vec = vectors[0]
+
+    # Resolve the target vector store
+    vs_store = get_vs_config_store()
+    if req.vs_id:
+        vs_config = vs_store.get(req.vs_id)
+        if not vs_config:
+            raise HTTPException(404, f"Vector store {req.vs_id!r} not found.")
+    else:
+        # Legacy fallback: use default Redis
+        vs_config = vs_store.get("default") or {}
+
+    client = get_vector_store_client(vs_config)
 
     tag_filter = list(req.tag_filter) if req.tag_filter else []
     if req.source_type:
         tag_filter.append(req.source_type)
 
-    fetch_k = req.top_k * 5 if req.usecase_id else req.top_k
-    results = query_vectorstore(req.query, top_k=fetch_k, tag_filter=tag_filter or None)
+    redis_tag_filter: str | None = None
+    if tag_filter:
+        redis_tag_filter = "@tags:{" + "|".join(tag_filter) + "}"
 
+    fetch_k = req.top_k * 5 if req.usecase_id else req.top_k
+    results = client.search(
+        vec,
+        top_k=fetch_k,
+        tag_filter=redis_tag_filter,
+        agent_filter=req.agent_filter,
+    )
+
+    # Legacy usecase post-filter (backwards compat)
     if req.usecase_id:
         try:
-            ledger = get_usecase_ledger()
-            allowed = set(ledger.get_chunk_ids(req.usecase_id, req.agent_filter or ""))
+            from pipeline.mongo_store import get_usecase_ledger
+            allowed = set(get_usecase_ledger().get_chunk_ids(req.usecase_id, req.agent_filter or ""))
             results = [r for r in results if r.get("chunk_id") in allowed]
         except Exception:
             pass
@@ -42,6 +68,13 @@ def search(req: SearchRequest):
         )
         for r in results
     ]
+
+
+@router.get("/vector-stores")
+def list_searchable_stores():
+    """List all configured vector stores for use in search."""
+    from pipeline.mongo_store import get_vs_config_store
+    return get_vs_config_store().list_all()
 
 
 @router.get("/usecases")
