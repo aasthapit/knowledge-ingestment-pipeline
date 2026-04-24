@@ -39,9 +39,23 @@ def _load_corpus_docs(corpus_id: str, kb_ids_tuple: tuple) -> list[dict]:
     return get_ledger().list_docs_by_kb_ids(list(kb_ids_tuple))
 
 
+@st.cache_data(ttl=30)
+def _load_staged_counts(kb_ids_tuple: tuple) -> dict[str, int]:
+    """Return a dict of {kb_id: staged_doc_count} for the given KB IDs."""
+    from pipeline.mongo_store import get_staging
+    kb_ids_set = set(kb_ids_tuple)
+    counts: dict[str, int] = {k: 0 for k in kb_ids_set}
+    for doc in get_staging().list_all():
+        kid = doc.get("kb_id")
+        if kid in kb_ids_set:
+            counts[kid] = counts.get(kid, 0) + 1
+    return counts
+
+
 def _invalidate(corpus_id: str | None = None) -> None:
     _load_corpora.clear()
     _load_corpus_docs.clear()
+    _load_staged_counts.clear()
     if corpus_id:
         _load_corpus.clear()
 
@@ -294,19 +308,20 @@ with right:
                     st.info("No Knowledge Bases in this corpus yet. Click **Edit** to add KBs.")
                 else:
                     import pandas as pd
+                    staged_counts = _load_staged_counts(corpus_kb_ids_tuple)
                     rows = []
                     for kid in corpus_kb_ids:
                         kb = kb_id_to_obj.get(kid)
+                        staged = staged_counts.get(kid, 0)
                         if kb:
                             rows.append({
                                 "Name":        kb.get("name", kid),
                                 "Type":        kb.get("source_type", "—"),
-                                "Status":      kb.get("status", "—"),
-                                "Staged docs": len(kb.get("doc_ids") or []),
+                                "Staged docs": staged,
                                 "kb_id":       kid,
                             })
                         else:
-                            rows.append({"Name": kid, "Type": "—", "Status": "—", "Staged docs": 0, "kb_id": kid})
+                            rows.append({"Name": kid, "Type": "—", "Staged docs": 0, "kb_id": kid})
                     df = pd.DataFrame(rows)
                     st.dataframe(df.drop(columns=["kb_id"]), hide_index=True)
 

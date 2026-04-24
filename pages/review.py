@@ -522,6 +522,14 @@ for doc in visible_docs:
                 disabled=True, width="stretch",
                 help=f"Reason: {reject_reason}" if reject_reason else None,
             )
+            with btn_cols[1].popover("🗑  Delete", width="stretch"):
+                st.warning(f"Permanently delete **{title}** and all its chunks?")
+                if st.button("Confirm delete", key=f"confirm_del_{doc_id}", type="primary"):
+                    from pipeline.mongo_store import get_staging
+                    get_staging().remove_doc(doc_id)
+                    st.toast(f"Deleted: {title}", icon="🗑")
+                    st.cache_data.clear()
+                    st.rerun()
 
         # Source link (if URL)
         if url:
