@@ -594,7 +594,8 @@ def import_jsonl(
                 schema_detected = detect_schema(rec)
             chunk, embedding = map_record(rec, schema_detected, extra_tags=extra_tags)
 
-        if not chunk.content.strip():
+        content = chunk.content.strip()
+        if not content:
             continue
 
         src = (
@@ -614,25 +615,55 @@ def import_jsonl(
         else:
             has_all_embeddings = False
 
-        d = chunk.to_dict()
-
-        # Per-chunk quality signals
-        content = chunk.content.strip()
-        char_count = len(content)
-        q_issues: list[str] = []
-        if char_count < MIN_CHUNK_CHARS:
-            q_issues.append("too_short")
-            n_too_short += 1
-        elif char_count > MAX_CHUNK_CHARS:
-            q_issues.append("too_long")
-            n_too_long += 1
-        if _is_boilerplate(content):
-            q_issues.append("boilerplate")
-            n_boilerplate += 1
-        if q_issues:
-            d.setdefault("metadata", {})["quality_flags"] = q_issues
-
-        chunks_dicts.append(d)
+        # Auto-split oversized records into character-overlap sub-chunks.
+        # Skip splitting when a pre-computed embedding exists — splitting would
+        # invalidate it.
+        if len(content) > MAX_CHUNK_CHARS and not embedding:
+            from pipeline.chunker import _split_large_chunk
+            from pipeline.config import settings as _settings
+            overlap = _settings.chunk_overlap_chars
+            parts = [p.strip() for p in _split_large_chunk(content, MAX_CHUNK_CHARS, overlap) if p.strip()]
+            n_parts = len(parts)
+            for idx, part in enumerate(parts):
+                section = chunk.section + (f" [{idx + 1}/{n_parts}]" if n_parts > 1 else "")
+                sub = Chunk(
+                    source=chunk.source,
+                    title=chunk.title,
+                    section=section,
+                    content=part,
+                    tags=list(chunk.tags),
+                    metadata=dict(chunk.metadata),
+                )
+                d = sub.to_dict()
+                q_issues: list[str] = []
+                if len(part) < MIN_CHUNK_CHARS:
+                    q_issues.append("too_short")
+                    n_too_short += 1
+                if _is_boilerplate(part):
+                    q_issues.append("boilerplate")
+                    n_boilerplate += 1
+                if q_issues:
+                    d.setdefault("metadata", {})["quality_flags"] = q_issues
+                chunks_dicts.append(d)
+                total += 1
+        else:
+            d = chunk.to_dict()
+            char_count = len(content)
+            q_issues = []
+            if char_count < MIN_CHUNK_CHARS:
+                q_issues.append("too_short")
+                n_too_short += 1
+            elif char_count > MAX_CHUNK_CHARS:
+                # Has a pre-computed embedding — flag rather than split
+                q_issues.append("too_long")
+                n_too_long += 1
+            if _is_boilerplate(content):
+                q_issues.append("boilerplate")
+                n_boilerplate += 1
+            if q_issues:
+                d.setdefault("metadata", {})["quality_flags"] = q_issues
+            chunks_dicts.append(d)
+            total += 1
 
         # Collect date for recency check (try multiple field paths)
         date_val = (
@@ -643,8 +674,6 @@ def import_jsonl(
         )
         if date_val and isinstance(date_val, str):
             record_dates.append(date_val)
-
-        total += 1
 
         if progress_cb and total % 1000 == 0:
             progress_cb(total, -1)

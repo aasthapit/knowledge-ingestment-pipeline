@@ -398,7 +398,14 @@ with right:
                                         f"{len(corpus_kb_ids)} KB(s). Stage and approve content first."
                                     )
                                 else:
-                                    lines = "\n".join(_json.dumps(c, ensure_ascii=False) for c in all_chunks)
+                                    import uuid as _uuid
+                                    doc_id   = str(_uuid.uuid4())
+                                    uc       = corpus.get("usecase_id") or ""
+                                    af       = corpus.get("agent_filter") or ""
+                                    lines    = "\n".join(
+                                        _json.dumps({**c, "document_id": doc_id, "usecase_id": uc, "agent_filter": af}, ensure_ascii=False)
+                                        for c in all_chunks
+                                    )
                                     fname = f"{_slug(corpus_name)}_{int(time.time())}.jsonl"
                                     st.download_button(
                                         label=f"⬇️ Download {fname}  ({len(all_chunks):,} chunks)",

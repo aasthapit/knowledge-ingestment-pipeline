@@ -309,15 +309,29 @@ if st.button(
             st.text(pg.content_text[:400] + ("…" if len(pg.content_text) > 400 else ""))
             st.divider()
 
-    ts          = int(time.time())
-    filename    = f"{_slug(kb_name)}_{ts}.jsonl"
-    jsonl_bytes = ("\n".join(all_jsonl_lines) + "\n").encode("utf-8")
+    ts       = int(time.time())
+    filename = f"{_slug(kb_name)}_{ts}.jsonl"
+
+    # Build bytes for staging (without export-only fields — staging re-reads the raw records)
+    stage_bytes = ("\n".join(all_jsonl_lines) + "\n").encode("utf-8")
+
+    # Build bytes for download with injected export fields
+    import uuid as _uuid
+    doc_id = str(_uuid.uuid4())
+    dl_lines = []
+    for raw in all_jsonl_lines:
+        rec = json.loads(raw)
+        rec["document_id"] = doc_id
+        rec["usecase_id"]  = ""
+        rec["agent_filter"] = ""
+        dl_lines.append(json.dumps(rec, ensure_ascii=False))
+    dl_bytes = ("\n".join(dl_lines) + "\n").encode("utf-8")
 
     if output_mode in ("Stage directly in Review Queue", "Stage + download"):
         with st.spinner("Staging pages in MongoDB…"):
             try:
                 from pipeline.ingest import ingest_jsonl
-                buf      = io.BytesIO(jsonl_bytes)
+                buf      = io.BytesIO(stage_bytes)
                 buf.name = filename
                 result   = ingest_jsonl(
                     source=buf,
@@ -332,7 +346,7 @@ if st.button(
     if output_mode in ("Download as JSONL file", "Stage + download"):
         st.download_button(
             label=f"⬇️  Download {filename}",
-            data=jsonl_bytes,
+            data=dl_bytes,
             file_name=filename,
             mime="application/x-ndjson",
             width="stretch",

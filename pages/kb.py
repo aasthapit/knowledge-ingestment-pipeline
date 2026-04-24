@@ -527,8 +527,12 @@ with right:
                                 if not chunks:
                                     st.warning("No chunks to export.")
                                 else:
-                                    import json as _json
-                                    lines = "\n".join(_json.dumps(c, ensure_ascii=False) for c in chunks)
+                                    import json as _json, uuid as _uuid
+                                    doc_id = str(_uuid.uuid4())
+                                    lines = "\n".join(
+                                        _json.dumps({**c, "document_id": doc_id, "usecase_id": "", "agent_filter": ""}, ensure_ascii=False)
+                                        for c in chunks
+                                    )
                                     fname = f"{_slug(kb_name)}_{int(time.time())}.jsonl"
                                     st.download_button(
                                         label=f"⬇️ Download {fname}",
@@ -569,8 +573,12 @@ with right:
                                 if not chunks:
                                     st.warning("No pushed chunks in staging — they may have been removed after push.")
                                 else:
-                                    import json as _json
-                                    lines = "\n".join(_json.dumps(c, ensure_ascii=False) for c in chunks)
+                                    import json as _json, uuid as _uuid
+                                    doc_id = str(_uuid.uuid4())
+                                    lines = "\n".join(
+                                        _json.dumps({**c, "document_id": doc_id, "usecase_id": "", "agent_filter": ""}, ensure_ascii=False)
+                                        for c in chunks
+                                    )
                                     fname = f"{_slug(kb_name)}_{int(time.time())}.jsonl"
                                     st.download_button(
                                         label=f"⬇️ Download {fname}",
