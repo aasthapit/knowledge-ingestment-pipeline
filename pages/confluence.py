@@ -1,8 +1,10 @@
-"""Confluence Import — crawl a page tree and stage it under a Knowledge Base."""
+"""Confluence Import — crawl one or more page trees and stage them under a Knowledge Base."""
 from __future__ import annotations
 
 import io
 import json
+import re
+import time
 
 import streamlit as st
 
@@ -10,8 +12,8 @@ from pipeline.config import settings
 
 st.title("🔗 Confluence Import")
 st.caption(
-    "Connect to Confluence, pick a parent page, and pull the entire page tree "
-    "into a Knowledge Base in one go."
+    "Connect to Confluence, pick a Knowledge Base, and pull all its registered page trees "
+    "into staging in one go. You can also crawl a one-off URL without registering it."
 )
 
 # ── Data loaders ──────────────────────────────────────────────────────────────
@@ -21,6 +23,10 @@ st.caption(
 def _load_confluence_kbs() -> list[dict]:
     from pipeline.mongo_store import get_kb_store
     return get_kb_store().list_all(source_type="confluence")
+
+
+def _slug(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
 
 
 # ── Knowledge Base selector ───────────────────────────────────────────────────
@@ -56,9 +62,9 @@ if selected_kb_id == "__new__":
                 name=new_kb_name.strip(),
                 source_type="confluence",
                 description="",
-                confluence_urls=[],
+                confluence_sources=[],
             )
-            st.success(f"Created KB **{new_kb_name.strip()}**. Select it above and fill in a page URL.")
+            st.success(f"Created KB **{new_kb_name.strip()}**. Select it above and add page URLs on the Knowledge Bases page.")
             _load_confluence_kbs.clear()
             st.rerun()
         except Exception as exc:
@@ -68,9 +74,10 @@ if selected_kb_id == "__new__":
 if not selected_kb_id:
     st.stop()
 
-# Pre-populate page URLs from KB config
-selected_kb = next((kb for kb in conf_kbs if kb["kb_id"] == selected_kb_id), None)
-default_page_url = (selected_kb.get("confluence_urls") or [""])[0] if selected_kb else ""
+selected_kb   = next((kb for kb in conf_kbs if kb["kb_id"] == selected_kb_id), None)
+kb_name       = selected_kb["name"] if selected_kb else "kb"
+kb_sources    = (selected_kb.get("confluence_sources") or []) if selected_kb else []
+kb_max_depth  = (selected_kb.get("max_depth") or -1) if selected_kb else -1
 
 # ── Connection ────────────────────────────────────────────────────────────────
 
@@ -115,39 +122,78 @@ api_token = st.text_input(
     type="password",
 )
 
-verify_ssl = not st.checkbox(
-    "Disable SSL certificate verification  *(self-signed / internal CA)*",
-    value=not settings.confluence_verify_ssl,
-)
+col_ssl, col_wiki = st.columns(2)
+with col_ssl:
+    verify_ssl = not st.checkbox(
+        "Disable SSL certificate verification  *(self-signed / internal CA)*",
+        value=not settings.confluence_verify_ssl,
+    )
+with col_wiki:
+    strip_wiki = st.checkbox(
+        "Strip `/wiki` from source URLs",
+        value=True,
+        help="Remove the /wiki path prefix from source URLs in the JSONL output. "
+             "Enable if your Confluence links don't include /wiki.",
+    )
 
 # ── Page selection ────────────────────────────────────────────────────────────
 
 st.divider()
-st.subheader("Page")
-
-page_url = st.text_input(
-    "Parent page URL or numeric page ID",
-    value=default_page_url,
-    placeholder="https://mycompany.atlassian.net/wiki/spaces/TEAM/pages/123456789/My-Page",
-    help="The crawler will fetch this page and every sub-page beneath it.",
-)
+st.subheader("Pages to crawl")
 
 col_depth, col_tags = st.columns(2)
 with col_depth:
     max_depth = st.number_input(
         "Max depth (-1 = all)",
         min_value=-1,
-        value=-1,
+        value=kb_max_depth,
         step=1,
         help="How many levels of child pages to follow. -1 fetches the entire tree.",
     )
 with col_tags:
     extra_tags_raw = st.text_input(
-        "Extra tags  *(optional)*",
-        placeholder="confluence, internal, team-docs",
-        help="Comma-separated tags added to every page.",
+        "Extra tags  *(optional, applied to all pages)*",
+        placeholder="confluence, internal",
+        help="Comma-separated tags added to every crawled page.",
     )
 extra_tags = [t.strip() for t in extra_tags_raw.split(",") if t.strip()]
+
+# Show registered KB sources with checkboxes
+if kb_sources:
+    st.markdown(f"**Registered sources** for *{kb_name}* — select which to crawl:")
+    selected_sources: list[dict] = []
+    for i, src in enumerate(kb_sources):
+        url  = src.get("url", "")
+        desc = src.get("description", "")
+        src_tags = src.get("tags") or []
+        label = url + (f" — {desc}" if desc else "")
+        checked = st.checkbox(label, value=True, key=f"src_chk_{i}")
+        if checked:
+            selected_sources.append(src)
+else:
+    selected_sources = []
+    st.info("No sources registered to this KB yet. Use the one-off URL below, or add sources on the **Knowledge Bases** page.")
+
+# One-off URL expander
+with st.expander("＋ Crawl additional (one-off) URL"):
+    oneoff_url = st.text_input(
+        "Page URL",
+        placeholder="https://mycompany.atlassian.net/wiki/spaces/TEAM/pages/123456789/My-Page",
+        key="oneoff_url",
+    )
+    oneoff_desc = st.text_input("Description (optional)", key="oneoff_desc")
+    oneoff_tags_raw = st.text_input("Tags (comma-separated)", key="oneoff_tags")
+    oneoff_tags = [t.strip() for t in oneoff_tags_raw.split(",") if t.strip()]
+    save_oneoff = st.checkbox("Save this URL to the KB for future use", value=True, key="save_oneoff")
+
+    if oneoff_url.strip():
+        selected_sources.append({
+            "url": oneoff_url.strip(),
+            "description": oneoff_desc.strip(),
+            "tags": oneoff_tags,
+            "_oneoff": True,
+            "_save": save_oneoff,
+        })
 
 # ── Output format ─────────────────────────────────────────────────────────────
 
@@ -163,8 +209,8 @@ output_mode = st.radio(
     ],
     horizontal=True,
     help=(
-        "Stage = push into MongoDB staging so you can review and push from the "
-        "Review Queue.  Download = saves a .jsonl file to your machine."
+        "Stage = push into MongoDB staging so you can review and export from the "
+        "Knowledge Bases page.  Download = saves a .jsonl file to your machine."
     ),
 )
 
@@ -172,12 +218,14 @@ output_mode = st.radio(
 
 st.divider()
 
-conn_ready = bool(base_url and api_token and page_url)
+conn_ready = bool(base_url and api_token and selected_sources)
 if is_cloud and not email:
     conn_ready = False
 
-if not conn_ready:
-    st.caption("Fill in connection details and a page URL to get started.")
+if not selected_sources:
+    st.caption("Select at least one source to crawl.")
+elif not conn_ready:
+    st.caption("Fill in connection details to get started.")
 
 if st.button(
     "🚀  Start crawl",
@@ -193,74 +241,90 @@ if st.button(
             email=email.strip(),
             api_token=api_token.strip(),
             verify_ssl=verify_ssl,
+            strip_wiki_prefix=strip_wiki,
         )
     except Exception as exc:
         st.error(f"Could not initialise connector: {exc}")
         st.stop()
 
-    progress_bar = st.progress(0.0, text="Discovering pages…")
+    all_pages: list = []
+    all_jsonl_lines: list[str] = []
 
-    def _cb(done: int, total: int) -> None:
-        if total > 0:
-            progress_bar.progress(done / total, text=f"Fetching {done:,} of {total:,} pages…")
-        else:
-            progress_bar.progress(min(done / 100, 0.99), text=f"Fetching page {done:,}…")
+    progress_bar = st.progress(0.0, text="Starting…")
+    total_sources = len(selected_sources)
 
-    try:
-        pages = crawler.crawl(
-            page_url=page_url.strip(),
-            max_depth=int(max_depth),
-            progress_cb=_cb,
-            extra_tags=extra_tags,
+    for src_idx, src in enumerate(selected_sources):
+        url      = src.get("url", "")
+        src_tags = list(set(extra_tags + (src.get("tags") or [])))
+        progress_bar.progress(src_idx / total_sources, text=f"Crawling {url}…")
+
+        def _cb(done: int, total: int, _url: str = url) -> None:
+            if total > 0:
+                frac = (src_idx + done / total) / total_sources
+                progress_bar.progress(frac, text=f"Fetching {done:,}/{total:,} pages from {_url}…")
+
+        try:
+            pages = crawler.crawl(
+                page_url=url,
+                max_depth=int(max_depth),
+                progress_cb=_cb,
+                extra_tags=src_tags,
+            )
+        except Exception as exc:
+            st.warning(f"Crawl failed for {url}: {exc}")
+            continue
+
+        all_pages.extend(pages)
+        all_jsonl_lines.extend(
+            json.dumps(crawler.to_record(p), ensure_ascii=False) for p in pages
         )
-        progress_bar.progress(1.0, text="Crawl complete!")
-    except Exception as exc:
-        st.error(f"Crawl failed: {exc}")
+
+        # Save one-off URL to KB if requested
+        if src.get("_oneoff") and src.get("_save"):
+            try:
+                from pipeline.mongo_store import get_kb_store
+                kb_store = get_kb_store()
+                current_kb = kb_store.get(selected_kb_id)
+                existing = current_kb.get("confluence_sources") or [] if current_kb else []
+                if not any(s.get("url") == url for s in existing):
+                    new_src = {"url": url, "description": src.get("description", ""), "tags": src.get("tags") or []}
+                    kb_store.update(selected_kb_id, confluence_sources=existing + [new_src])
+                    _load_confluence_kbs.clear()
+            except Exception:
+                pass
+
+    progress_bar.progress(1.0, text="Crawl complete!")
+
+    if not all_pages:
+        st.warning("No pages with content were found. Check the page URLs and permissions.")
         st.stop()
 
-    if not pages:
-        st.warning("No pages with content were found. Check the page URL and permissions.")
-        st.stop()
+    st.success(f"Fetched **{len(all_pages):,}** pages across {total_sources} source(s).")
 
-    st.success(f"Fetched **{len(pages):,}** pages.")
-
-    with st.expander(f"Preview — first 5 of {len(pages):,} pages"):
-        for pg in pages[:5]:
+    with st.expander(f"Preview — first 5 of {len(all_pages):,} pages"):
+        for pg in all_pages[:5]:
             st.markdown(f"**{pg.title}**")
-            breadcrumb = " > ".join(pg.ancestors + [pg.title])
-            st.caption(breadcrumb)
+            st.caption(" > ".join(pg.ancestors + [pg.title]))
             st.caption(f"🔗 {pg.url}")
-            preview = pg.content_text[:400]
-            st.text(preview + ("…" if len(pg.content_text) > 400 else ""))
+            st.text(pg.content_text[:400] + ("…" if len(pg.content_text) > 400 else ""))
             st.divider()
 
-    jsonl_lines = [json.dumps(crawler.to_record(p), ensure_ascii=False) for p in pages]
-    jsonl_bytes = ("\n".join(jsonl_lines) + "\n").encode("utf-8")
-    filename    = f"confluence_{len(pages)}_pages.jsonl"
+    ts          = int(time.time())
+    filename    = f"{_slug(kb_name)}_{ts}.jsonl"
+    jsonl_bytes = ("\n".join(all_jsonl_lines) + "\n").encode("utf-8")
 
     if output_mode in ("Stage directly in Review Queue", "Stage + download"):
         with st.spinner("Staging pages in MongoDB…"):
             try:
                 from pipeline.ingest import ingest_jsonl
-                buf = io.BytesIO(jsonl_bytes)
+                buf      = io.BytesIO(jsonl_bytes)
                 buf.name = filename
-                result = ingest_jsonl(
+                result   = ingest_jsonl(
                     source=buf,
                     batch_name=filename,
                     extra_tags=extra_tags,
                     kb_id=selected_kb_id,
                 )
-                # Update KB with the crawled page URL
-                try:
-                    from pipeline.mongo_store import get_kb_store
-                    kb_store = get_kb_store()
-                    kb = kb_store.get(selected_kb_id)
-                    existing_urls = kb.get("confluence_urls") or [] if kb else []
-                    if page_url.strip() not in existing_urls:
-                        existing_urls.append(page_url.strip())
-                        kb_store.update(selected_kb_id, confluence_urls=existing_urls)
-                except Exception:
-                    pass
                 st.session_state["confluence_import_result"] = result
             except Exception as exc:
                 st.error(f"Staging failed: {exc}")
@@ -289,7 +353,8 @@ if "confluence_import_result" in st.session_state:
         m2.metric("Unique URLs",   f"{r['unique_sources']:,}")
         m3.metric("Pre-embedded",  "Yes" if r.get("has_embeddings") else "No")
         st.info(
-            "Go to **Review Queue** to approve these pages, then push them via a corpus.\n\n"
+            "Go to **Review Queue** to approve these pages, then download JSONL from the "
+            "**Knowledge Bases** page.\n\n"
             f"Batch ID: `{r['doc_id']}`"
         )
         if st.button("Clear", key="clear_confluence"):

@@ -2,22 +2,22 @@
 
 ## What Is This?
 
-The Knowledge Ingestion Pipeline is a tool for building and maintaining knowledge bases that AI agents use to answer questions. It sits between your source documents (Confluence wikis, PDFs, web pages, spreadsheet exports) and the AI that reads them — ensuring that what the AI retrieves is accurate, current, and relevant.
+The Knowledge Ingestion Pipeline is a **data preparation and management tool** for AI knowledge bases. It sits between your source documents (Confluence wikis, PDFs, web pages, JSONL exports) and whatever downstream system will embed and serve them — ensuring that what gets exported is accurate, current, and curated.
 
-Think of it as a **content supply chain for AI**: raw documents go in one end, curated and searchable knowledge comes out the other.
+Think of it as a **content supply chain for AI**: raw documents go in one end, reviewed and clean JSONL comes out the other. Where you send that JSONL — a vector store, a fine-tuning dataset, an embedding pipeline — is up to you.
 
 ---
 
 ## The Problem It Solves
 
-The naive approach to building an AI knowledge base is to embed all your documents and search them. This works for a prototype but degrades quickly in production:
+The naive approach to building an AI knowledge base is to dump all your documents in and embed them. This works for a prototype but degrades quickly in production:
 
-- **Stale content** accumulates. Pages updated in Confluence six months ago are still in the index with old information.
-- **Low-quality chunks** pollute search results. Navigation menus, copyright footers, and empty section headings all end up in the index as if they were real content.
-- **No audit trail.** You can't tell what's in the index, when it was added, or whether it's still accurate.
-- **No scope control.** Different AI agents serving different use cases all query the same undifferentiated index.
+- **Stale content** accumulates. Pages updated in Confluence six months ago are still in your context windows.
+- **Low-quality chunks** add noise. Navigation menus, copyright footers, and empty section headings all end up treated as real content.
+- **No audit trail.** You can't tell what's been ingested, when, or whether it's still accurate.
+- **Single root URL per KB.** One Confluence URL per knowledge base means multiple KBs for what is conceptually one source.
 
-This pipeline adds a structured process around those steps: convert → assess quality → stage for review → approve → embed → index → track.
+This pipeline adds a structured process: convert → assess quality → stage for review → approve → export JSONL. The vector store step is optional and separate.
 
 ---
 
@@ -31,15 +31,15 @@ This pipeline adds a structured process around those steps: convert → assess q
 
 ## Core Concepts
 
-### The Ingest-Review-Push Lifecycle
+### The Ingest-Review-Export Lifecycle
 
-Nothing reaches the AI without passing through three stages:
+Nothing leaves the pipeline without passing through three stages:
 
 1. **Ingest** — a document is converted, chunked, and assessed for quality. If it passes cleanly, it's auto-approved. If any section is flagged (too short, too long, boilerplate, or stale), it enters the human review queue.
 2. **Review** — a knowledge engineer inspects flagged documents, edits chunks if needed, and approves or rejects them.
-3. **Push** — approved documents are embedded (converted to vector representations) and written to the Redis search index. Only pushed documents are searchable.
+3. **Export** — approved documents can be downloaded as JSONL from the KB page or the Corpus page. Optionally, approved documents can also be pushed to a vector store.
 
-The staging area (MongoDB) acts as a gate: the vector index only ever contains content that a human or automated quality check has approved.
+The staging area (MongoDB) acts as a gate: only content that a human or automated quality check has approved gets exported.
 
 ### Chunks, Not Documents
 
@@ -103,11 +103,13 @@ None of these edits require re-ingestion — all changes apply directly to the s
 ### Confluence Integration
 
 The pipeline has a first-class Confluence connector:
+- **Multiple sources per KB** — register multiple Confluence page trees under one KB, each with its own description and tags
 - Crawls page trees recursively, preserving ancestor breadcrumbs
-- Stores a metadata snapshot (page versions) after each crawl
-- Compares the snapshot against current Confluence state to detect which pages have been added, removed, or updated — without re-fetching body content
-- Supports scheduled auto-refresh via cron expressions (checked every 5 minutes by a background scheduler)
-- Incremental refresh: only changed or new pages are re-ingested
+- **Strip `/wiki` from source URLs** — optional toggle so exported source URLs match your actual Confluence links
+- **Refresh KB** button — clears all current staged content for a KB and re-crawls all registered sources in one click
+- Stores a metadata snapshot (page versions) after each crawl for drift detection
+- Supports scheduled auto-refresh via cron expressions (background scheduler)
+- Output filenames use `{kb_name}_{timestamp}.jsonl` instead of generic names
 
 ### Corpus Versioning with Manifests
 
@@ -135,40 +137,39 @@ The importer handles data from any external system via schema detection and cust
 ```
 1.  Knowledge Engineer opens the Streamlit app at localhost:8501
 
-2.  ADD DOCUMENT
-    - Upload file / paste URL / upload JSONL
-    - Select use case ID + agent filter
-    - System converts, chunks, and quality-checks
-    - Result: auto-approved (score 1.0) or sent to review queue
+2.  CREATE KNOWLEDGE BASE
+    - Create a KB of type: confluence, jsonl, web, or file
+    - For Confluence: register one or more page tree URLs, each with
+      description and tags
 
-3.  REVIEW QUEUE  (if flagged)
+3.  INGEST CONTENT
+    - Confluence: go to the Confluence page, select the KB,
+      choose which sources to crawl, hit Start crawl
+    - OR hit "🔄 Refresh KB" on the KB detail page to replace all
+      staged content with a fresh crawl
+    - File/JSONL: upload via Add Document page
+    - System converts, chunks, and quality-checks
+
+4.  REVIEW QUEUE  (if flagged)
     - Inspect flagged chunks with quality signals
     - Edit content / tags, split chunks, reorganise if needed
     - Approve or reject
 
-4.  PUSH TO KB
-    - Click "Push N approved documents"
-    - System embeds chunks via OpenAI (or local model)
-    - Vectors upserted into Redis search index
-    - KB ledger + use case ledger updated
-    - Documents are now searchable
-
-5.  AI AGENT QUERIES
-    - Agent sends question as text
-    - System embeds the question, runs KNN search in Redis
-    - Returns top-k chunks with relevance scores and source citations
-    - Agent can optionally filter to its own use case
+5.  EXPORT JSONL
+    - Download from KB page: ⬇️ Download JSONL button (staged or pushed tab)
+    - OR: create a Corpus grouping multiple KBs, then Export tab
+      → "Prepare corpus JSONL" → download all chunks in one file
+    - Feed the JSONL to any embedding pipeline
 
 6.  HEALTH MONITORING
     - KB Health page: check all pushed docs for drift
-    - Use Case Ledger: view live coverage per (use case, agent)
-    - Confluence sources: check last crawl, trigger manual refresh
+    - Confluence sources: check last crawl, refresh on demand
     - Manifests: snapshot corpus before major changes
 
 7.  ONGOING MAINTENANCE
     - Confluence sources refresh automatically on schedule
     - Stale file sources flagged in drift check
-    - Knowledge engineer re-ingests changed sources as needed
+    - "Refresh KB" replaces staged content with latest Confluence data
 ```
 
 ---
@@ -177,18 +178,20 @@ The importer handles data from any external system via schema detection and cust
 
 | Data | Store | Purpose |
 |---|---|---|
-| In-flight document chunks during ingest/review | MongoDB `staging_docs` + `staging_chunks` | Human review gate; editable before push |
+| In-flight document chunks during ingest/review | MongoDB `staging_docs` + `staging_chunks` | Human review gate; source for JSONL export |
+| Knowledge Base definitions (sources, tags, config) | MongoDB `knowledge_bases` | `confluence_sources` per-entry with description/tags |
 | Pushed document records + drift fingerprints | MongoDB `kb_documents` | Audit trail; drift detection |
-| Chunk-ID inventory per use case | MongoDB `usecase_ledger` | Scoped search; coverage tracking |
+| Chunk-ID inventory per use case | MongoDB `usecase_ledger` | Coverage tracking |
 | Confluence source metadata + schedules | MongoDB `usecase_confluence_sources` | Refresh scheduling; lightweight drift check |
 | Corpus version snapshots | MongoDB `doc_manifests` | Versioning; diff; re-ingest |
-| Searchable vector embeddings | Redis Stack (RediSearch) | KNN semantic search |
+| Searchable vector embeddings (optional) | Redis Stack (RediSearch) | KNN semantic search if using built-in vector store |
 
 ---
 
 ## What This Tool Is Not
 
-- **Not a search API.** It manages the corpus. AI agents query Redis directly.
+- **Not an embedding pipeline.** It prepares and exports JSONL. Embedding is a separate step you control.
+- **Not a search API.** Semantic search is an optional built-in feature via Redis; it is not the primary output.
 - **Not a document store.** Original files are not kept — only processed chunks.
 - **Not multi-tenant.** The UI has no authentication; it assumes a trusted single-user environment.
 - **Not a distributed system.** The Confluence refresh scheduler runs in-process; multi-instance deployments would need coordination.

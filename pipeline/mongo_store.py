@@ -349,6 +349,14 @@ class MongoStagingStore:
         self._docs.delete_one({"_id": doc_id})
         self._chunks.delete_many({"doc_id": doc_id})
 
+    def clear_by_kb(self, kb_id: str) -> int:
+        """Delete all staged docs and their chunks for a given kb_id. Returns doc count removed."""
+        doc_ids = [d["_id"] for d in self._docs.find({"kb_id": kb_id}, {"_id": 1})]
+        if doc_ids:
+            self._chunks.delete_many({"doc_id": {"$in": doc_ids}})
+            self._docs.delete_many({"kb_id": kb_id})
+        return len(doc_ids)
+
     # ------------------------------------------------------------------
     # Read operations (mirrors Redis StagingStore interface)
     # ------------------------------------------------------------------
@@ -1374,12 +1382,23 @@ class KnowledgeBaseStore:
         self._coll.create_index("source_type")
         self._coll.create_index("status")
 
+    @staticmethod
+    def _urls_to_sources(urls: list[str]) -> list[dict]:
+        """Convert a plain list of URL strings to the richer confluence_sources format."""
+        return [{"url": u, "description": "", "tags": []} for u in urls if u]
+
+    @staticmethod
+    def _sources_to_urls(sources: list[dict]) -> list[str]:
+        """Extract URL strings from a confluence_sources list."""
+        return [s["url"] for s in sources if s.get("url")]
+
     def create(
         self,
         name: str,
         source_type: str,
         description: str = "",
         confluence_urls: list[str] | None = None,
+        confluence_sources: list[dict] | None = None,
         max_depth: int = -1,
         refresh_cron: str | None = None,
         file_name: str | None = None,
@@ -1389,8 +1408,10 @@ class KnowledgeBaseStore:
         chunk_overlap_chars: int | None = None,
     ) -> str:
         """Create a new KB and return its kb_id."""
-        if source_type not in ("confluence", "jsonl", "web"):
-            raise ValueError(f"source_type must be 'confluence', 'jsonl', or 'web', got {source_type!r}")
+        if source_type not in ("confluence", "jsonl", "web", "file"):
+            raise ValueError(f"source_type must be 'confluence', 'jsonl', 'web', or 'file', got {source_type!r}")
+        if confluence_sources is None and confluence_urls is not None:
+            confluence_sources = self._urls_to_sources(confluence_urls)
         now = datetime.now(timezone.utc)
         kb_id = str(uuid.uuid4())
         self._coll.insert_one({
@@ -1398,7 +1419,7 @@ class KnowledgeBaseStore:
             "name":                name,
             "description":         description,
             "source_type":         source_type,
-            "confluence_urls":     confluence_urls or [],
+            "confluence_sources":  confluence_sources or [],
             "max_depth":           max_depth,
             "refresh_cron":        refresh_cron,
             "file_name":           file_name or "",
@@ -1420,6 +1441,7 @@ class KnowledgeBaseStore:
         name: str | None = None,
         description: str | None = None,
         confluence_urls: list[str] | None = None,
+        confluence_sources: list[dict] | None = None,
         max_depth: int | None = None,
         refresh_cron: str | None = None,
         file_name: str | None = None,
@@ -1433,8 +1455,11 @@ class KnowledgeBaseStore:
             fields["name"] = name
         if description is not None:
             fields["description"] = description
-        if confluence_urls is not None:
-            fields["confluence_urls"] = confluence_urls
+        # confluence_sources takes precedence; confluence_urls is a legacy alias
+        if confluence_sources is not None:
+            fields["confluence_sources"] = confluence_sources
+        elif confluence_urls is not None:
+            fields["confluence_sources"] = self._urls_to_sources(confluence_urls)
         if max_depth is not None:
             fields["max_depth"] = max_depth
         if refresh_cron is not None:
@@ -1496,6 +1521,12 @@ class KnowledgeBaseStore:
             val = doc.get(key)
             if isinstance(val, datetime):
                 doc[key] = val.isoformat()
+        # Migrate legacy confluence_urls → confluence_sources on read
+        if "confluence_sources" not in doc or not doc["confluence_sources"]:
+            legacy_urls = doc.get("confluence_urls") or []
+            doc["confluence_sources"] = [{"url": u, "description": "", "tags": []} for u in legacy_urls if u]
+        # Always expose confluence_urls as derived list for backward compat
+        doc["confluence_urls"] = [s["url"] for s in doc["confluence_sources"] if s.get("url")]
         return doc
 
 

@@ -1,13 +1,15 @@
-"""Corpus Management — collections of Knowledge Bases scoped to a use case."""
+"""Corpus Management — collections of Knowledge Bases for data preparation and export."""
 from __future__ import annotations
+
+import re
+import time
 
 import streamlit as st
 
 st.title("📦 Corpus Management")
 st.caption(
-    "A corpus is a named collection of Knowledge Bases. It carries the use case ID, "
-    "agent filter, and target vector DB. Pushing a corpus embeds and indexes all approved "
-    "documents from its Knowledge Bases."
+    "A corpus is a named collection of Knowledge Bases. "
+    "Group your KBs together and download all their staged content as a single JSONL file."
 )
 
 # ── Data loaders ──────────────────────────────────────────────────────────────
@@ -29,12 +31,6 @@ def _load_corpus(corpus_id: str) -> dict | None:
 def _load_kbs() -> list[dict]:
     from pipeline.mongo_store import get_kb_store
     return get_kb_store().list_all()
-
-
-@st.cache_data(ttl=30)
-def _load_vs_configs() -> list[dict]:
-    from pipeline.mongo_store import get_vs_config_store
-    return get_vs_config_store().list_all()
 
 
 @st.cache_data(ttl=60)
@@ -59,6 +55,10 @@ def _fmt_date(iso: str | None) -> str:
         return dt.strftime("%Y-%m-%d %H:%M")
     except Exception:
         return iso[:16] if iso else "—"
+
+
+def _slug(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
 
 
 # ── Connection guard ──────────────────────────────────────────────────────────
@@ -100,13 +100,10 @@ with left:
     if st.session_state.corpus_create_open:
         try:
             available_kbs = _load_kbs()
-            available_vs  = _load_vs_configs()
         except Exception:
             available_kbs = []
-            available_vs  = []
 
         kb_options = {kb["name"]: kb["kb_id"] for kb in available_kbs}
-        vs_options = {vs["name"]: vs["vs_id"] for vs in available_vs}
 
         with st.form("create_corpus_form", border=True):
             st.markdown("**Create Corpus**")
@@ -119,21 +116,12 @@ with left:
                 "Knowledge Bases",
                 options=list(kb_options.keys()),
                 placeholder="Add KBs to this corpus…",
-                help="Select one or more Knowledge Bases to include.",
-            )
-            selected_vs_name = st.selectbox(
-                "Vector Store",
-                options=list(vs_options.keys()) or ["(none)"],
-                help="Which vector DB to push this corpus to.",
             )
 
             submitted = st.form_submit_button("Create", type="primary")
             if submitted:
-                vs_id = vs_options.get(selected_vs_name) if selected_vs_name != "(none)" else None
                 if not new_name.strip():
                     st.error("Name is required.")
-                elif vs_id is None:
-                    st.error("A vector store is required. Add one on the Vector Stores page first.")
                 else:
                     try:
                         from pipeline.mongo_store import get_corpus_store
@@ -144,7 +132,6 @@ with left:
                             usecase_id=new_uc.strip() or None,
                             agent_filter=new_af.strip() or None,
                             kb_ids=kb_ids,
-                            vector_store_id=vs_id,
                         )
                         _invalidate()
                         st.session_state.corpus_selected = cid
@@ -162,9 +149,9 @@ with left:
         st.info("No corpora yet. Click **＋ New** to create one.")
     else:
         for c in all_corpora:
-            cid = c["corpus_id"]
+            cid      = c["corpus_id"]
             kb_count = len(c.get("kb_ids") or [])
-            label = f"**{c['name']}**  \n{kb_count} KB{'s' if kb_count != 1 else ''}"
+            label    = f"**{c['name']}**  \n{kb_count} KB{'s' if kb_count != 1 else ''}"
             if c.get("usecase_id"):
                 label += f"  \nuc: `{c['usecase_id']}`"
             btn_type = "primary" if st.session_state.corpus_selected == cid else "secondary"
@@ -193,10 +180,12 @@ with right:
             st.warning("Corpus not found — it may have been deleted.")
             st.session_state.corpus_selected = None
         else:
+            corpus_name = corpus["name"]
+
             # ── Header ────────────────────────────────────────────────────────
             hd1, hd2 = st.columns([3, 1])
             with hd1:
-                st.subheader(corpus["name"])
+                st.subheader(corpus_name)
                 if corpus.get("description"):
                     st.caption(corpus["description"])
             with hd2:
@@ -210,7 +199,7 @@ with right:
 
             if st.session_state.get(f"confirm_delete_{sel_id}"):
                 st.warning(
-                    f"Delete corpus **{corpus['name']}**? "
+                    f"Delete corpus **{corpus_name}**? "
                     "This removes the corpus record; Knowledge Bases and staged documents are not affected."
                 )
                 dc1, dc2, _ = st.columns([1, 1, 4])
@@ -231,13 +220,10 @@ with right:
             if st.session_state.corpus_edit_open:
                 try:
                     available_kbs = _load_kbs()
-                    available_vs  = _load_vs_configs()
                 except Exception:
                     available_kbs = []
-                    available_vs  = []
 
-                kb_opts = {kb["name"]: kb["kb_id"] for kb in available_kbs}
-                vs_opts = {vs["name"]: vs["vs_id"] for vs in available_vs}
+                kb_opts       = {kb["name"]: kb["kb_id"] for kb in available_kbs}
                 kb_id_to_name = {kb["kb_id"]: kb["name"] for kb in available_kbs}
 
                 current_kb_names = [
@@ -245,10 +231,6 @@ with right:
                     for kid in (corpus.get("kb_ids") or [])
                     if kid in kb_id_to_name
                 ]
-                current_vs_name  = next(
-                    (vs["name"] for vs in available_vs if vs["vs_id"] == corpus.get("vector_store_id")),
-                    list(vs_opts.keys())[0] if vs_opts else "(none)",
-                )
 
                 with st.form("edit_corpus_form", border=True):
                     st.markdown("**Edit Corpus**")
@@ -260,29 +242,17 @@ with right:
                         options=list(kb_opts.keys()),
                         default=current_kb_names,
                     )
-                    e_vs = st.selectbox(
-                        "Vector Store",
-                        options=list(vs_opts.keys()) or ["(none)"],
-                        index=list(vs_opts.keys()).index(current_vs_name)
-                        if current_vs_name in vs_opts
-                        else 0,
-                    )
                     saved = st.form_submit_button("Save", type="primary")
                     if saved:
-                        new_vs_id = vs_opts.get(e_vs) if e_vs != "(none)" else None
-                        if new_vs_id is None:
-                            st.error("A vector store is required.")
-                        else:
-                            from pipeline.mongo_store import get_corpus_store
-                            new_kb_ids = [kb_opts[n] for n in e_kbs]
-                            get_corpus_store().update(
-                                corpus_id=sel_id,
-                                description=e_desc.strip() or None,
-                                usecase_id=e_uc.strip() or None,
-                                agent_filter=e_af.strip() or None,
-                                kb_ids=new_kb_ids,
-                                vector_store_id=new_vs_id,
-                            )
+                        from pipeline.mongo_store import get_corpus_store
+                        new_kb_ids = [kb_opts[n] for n in e_kbs]
+                        get_corpus_store().update(
+                            corpus_id=sel_id,
+                            description=e_desc.strip() or None,
+                            usecase_id=e_uc.strip() or None,
+                            agent_filter=e_af.strip() or None,
+                            kb_ids=new_kb_ids,
+                        )
                         _invalidate(sel_id)
                         st.session_state.corpus_edit_open = False
                         st.success("Corpus updated.")
@@ -300,35 +270,28 @@ with right:
             # ── Stats ─────────────────────────────────────────────────────────
             try:
                 available_kbs = _load_kbs()
-                available_vs  = _load_vs_configs()
             except Exception:
                 available_kbs = []
-                available_vs  = []
 
             kb_id_to_obj = {kb["kb_id"]: kb for kb in available_kbs}
-            vs_id_to_obj = {vs["vs_id"]: vs for vs in available_vs}
+            kb_count     = len(corpus.get("kb_ids") or [])
 
-            kb_count = len(corpus.get("kb_ids") or [])
-            vs_name  = vs_id_to_obj.get(corpus.get("vector_store_id", ""), {}).get("name", "—")
-
-            s1, s2, s3 = st.columns(3)
+            s1, s2 = st.columns(2)
             s1.metric("Knowledge Bases", kb_count)
-            s2.metric("Vector Store",    vs_name)
-            s3.metric("Last updated",    _fmt_date(corpus.get("last_updated")))
+            s2.metric("Last updated", _fmt_date(corpus.get("last_updated")))
 
             st.divider()
 
             # ── Tabs ──────────────────────────────────────────────────────────
-            tab_kbs, tab_docs, tab_push = st.tabs(["Knowledge Bases", "Documents", "Push"])
+            corpus_kb_ids       = corpus.get("kb_ids") or []
+            corpus_kb_ids_tuple = tuple(sorted(corpus_kb_ids))
+
+            tab_kbs, tab_docs, tab_export = st.tabs(["Knowledge Bases", "Documents", "Export"])
 
             # ── KBs tab ───────────────────────────────────────────────────────
             with tab_kbs:
-                corpus_kb_ids = corpus.get("kb_ids") or []
                 if not corpus_kb_ids:
-                    st.info(
-                        "No Knowledge Bases in this corpus yet. "
-                        "Click **Edit** to add KBs."
-                    )
+                    st.info("No Knowledge Bases in this corpus yet. Click **Edit** to add KBs.")
                 else:
                     import pandas as pd
                     rows = []
@@ -336,21 +299,17 @@ with right:
                         kb = kb_id_to_obj.get(kid)
                         if kb:
                             rows.append({
-                                "Name":         kb.get("name", kid),
-                                "Type":         kb.get("source_type", "—"),
-                                "Status":       kb.get("status", "—"),
-                                "Staged docs":  len(kb.get("doc_ids") or []),
-                                "kb_id":        kid,
+                                "Name":        kb.get("name", kid),
+                                "Type":        kb.get("source_type", "—"),
+                                "Status":      kb.get("status", "—"),
+                                "Staged docs": len(kb.get("doc_ids") or []),
+                                "kb_id":       kid,
                             })
                         else:
-                            rows.append({
-                                "Name": kid, "Type": "—", "Status": "—",
-                                "Staged docs": 0, "kb_id": kid,
-                            })
+                            rows.append({"Name": kid, "Type": "—", "Status": "—", "Staged docs": 0, "kb_id": kid})
                     df = pd.DataFrame(rows)
                     st.dataframe(df.drop(columns=["kb_id"]), hide_index=True)
 
-                    # Quick-remove KBs
                     kbs_to_remove = st.multiselect(
                         "Remove KBs from corpus",
                         options=[r["Name"] for r in rows],
@@ -360,11 +319,7 @@ with right:
                     if kbs_to_remove:
                         name_to_id = {r["Name"]: r["kb_id"] for r in rows}
                         ids_to_remove = [name_to_id[n] for n in kbs_to_remove]
-                        if st.button(
-                            f"Remove {len(kbs_to_remove)} KB(s)",
-                            type="primary",
-                            key="do_rm_kbs",
-                        ):
+                        if st.button(f"Remove {len(kbs_to_remove)} KB(s)", type="primary", key="do_rm_kbs"):
                             from pipeline.mongo_store import get_corpus_store
                             get_corpus_store().remove_kbs(sel_id, ids_to_remove)
                             _invalidate(sel_id)
@@ -373,7 +328,6 @@ with right:
 
             # ── Documents tab ─────────────────────────────────────────────────
             with tab_docs:
-                corpus_kb_ids_tuple = tuple(sorted(corpus.get("kb_ids") or []))
                 try:
                     pushed_docs_list = _load_corpus_docs(sel_id, corpus_kb_ids_tuple)
                 except Exception as exc:
@@ -381,13 +335,9 @@ with right:
                     st.warning(f"Could not load pushed documents: {exc}")
 
                 if not pushed_docs_list:
-                    st.info("No pushed documents in this corpus yet. Push the corpus first.")
+                    st.info("No pushed documents in this corpus yet.")
                 else:
-                    search_q = st.text_input(
-                        "Filter by title or source",
-                        placeholder="Search…",
-                        key=f"doc_search_{sel_id}",
-                    )
+                    search_q = st.text_input("Filter by title or KB", placeholder="Search…", key=f"doc_search_{sel_id}")
                     import pandas as pd
                     rows_d = [
                         {
@@ -410,84 +360,100 @@ with right:
                     st.caption(f"{len(df_d)} document(s)")
                     st.dataframe(df_d, hide_index=True)
 
-            # ── Push tab ──────────────────────────────────────────────────────
-            with tab_push:
+            # ── Export tab ────────────────────────────────────────────────────
+            with tab_export:
                 st.markdown(
-                    "Push embeds all approved documents from this corpus's Knowledge Bases "
-                    f"and writes them to **{vs_name}**."
+                    "Download all staged content from every Knowledge Base in this corpus as a single JSONL file."
                 )
 
                 if not corpus_kb_ids:
-                    st.info("Add at least one Knowledge Base before pushing.")
-                elif not corpus.get("vector_store_id"):
-                    st.warning("Set a Vector Store target on this corpus before pushing.")
+                    st.info("Add at least one Knowledge Base before exporting.")
                 else:
-                    col_push, _ = st.columns([2, 3])
-                    with col_push:
-                        if st.button("🚀 Push corpus", type="primary", width="stretch"):
-                            with st.spinner("Embedding and pushing…"):
-                                try:
-                                    from pipeline.review import push_approved
-                                    result = push_approved(corpus_id=sel_id)
-                                    st.success(
-                                        f"Pushed **{result.get('pushed_docs', 0)}** document(s) — "
-                                        f"**{result.get('pushed_chunks', 0):,}** sections indexed."
+                    export_status = st.radio(
+                        "Include chunks with status",
+                        ["all (staged + approved + pushed)", "approved", "pushed"],
+                        horizontal=True,
+                        key=f"export_status_{sel_id}",
+                    )
+                    status_map = {
+                        "all (staged + approved + pushed)": None,
+                        "approved": "approved",
+                        "pushed": "pushed",
+                    }
+                    chosen_status = status_map[export_status]
+
+                    if st.button("⬇️ Prepare corpus JSONL", type="primary", key=f"export_btn_{sel_id}"):
+                        with st.spinner("Collecting chunks…"):
+                            try:
+                                import json as _json
+                                from pipeline.mongo_store import get_staging
+                                staging = get_staging()
+                                all_chunks: list[dict] = []
+                                for kid in corpus_kb_ids:
+                                    all_chunks.extend(staging.get_chunks_by_kb(kid, status=chosen_status))
+
+                                if not all_chunks:
+                                    st.warning(
+                                        f"No chunks found with status={chosen_status!r} across "
+                                        f"{len(corpus_kb_ids)} KB(s). Stage and approve content first."
                                     )
-                                    if result.get("errors"):
-                                        for err in result["errors"]:
-                                            st.error(err)
-                                    _invalidate(sel_id)
-                                    st.rerun()
-                                except Exception as exc:
-                                    st.error(f"Push failed: {exc}")
+                                else:
+                                    lines = "\n".join(_json.dumps(c, ensure_ascii=False) for c in all_chunks)
+                                    fname = f"{_slug(corpus_name)}_{int(time.time())}.jsonl"
+                                    st.download_button(
+                                        label=f"⬇️ Download {fname}  ({len(all_chunks):,} chunks)",
+                                        data=lines.encode("utf-8"),
+                                        file_name=fname,
+                                        mime="application/x-ndjson",
+                                        key=f"dl_corpus_{sel_id}",
+                                    )
+                            except Exception as exc:
+                                st.error(f"Export failed: {exc}")
 
                     st.divider()
-                    with st.expander("⚠️ Danger zone"):
-                        st.markdown(
-                            "**Flush vector store** — removes all indexed chunks for this corpus "
-                            "from **{vs_name}**. Ledger records are preserved; you can re-push afterwards.".format(vs_name=vs_name)
+
+                    # Vector store push (secondary / advanced)
+                    with st.expander("Vector store push (advanced)"):
+                        st.caption(
+                            "Push this corpus to a vector store for semantic search. "
+                            "Requires a vector store to be configured."
                         )
+                        try:
+                            from pipeline.mongo_store import get_vs_config_store
+                            available_vs = get_vs_config_store().list_all()
+                        except Exception:
+                            available_vs = []
 
-                        flush_key = f"confirm_flush_{sel_id}"
-                        if not st.session_state.get(flush_key):
-                            if st.button("🗑️ Flush vector store", key=f"flush_btn_{sel_id}"):
-                                st.session_state[flush_key] = True
-                                st.rerun()
+                        if not available_vs:
+                            st.info("No vector stores configured. Add one on the **Vector Stores** page.")
                         else:
-                            try:
-                                from pipeline.mongo_store import get_ledger
-                                preview_docs = get_ledger().list_docs_by_kb_ids(
-                                    corpus.get("kb_ids") or [], limit=10_000
-                                )
-                                total_chunks = sum(len(d.get("chunk_ids") or []) for d in preview_docs)
-                                st.warning(
-                                    f"This will delete **{total_chunks:,}** chunks across "
-                                    f"**{len(preview_docs)}** document(s) from **{vs_name}**. "
-                                    "Ledger records are preserved. You can re-push afterwards."
-                                )
-                            except Exception:
-                                st.warning(f"This will delete all indexed chunks from **{vs_name}**.")
+                            vs_opts  = {vs["name"]: vs["vs_id"] for vs in available_vs}
+                            vs_id_to = {vs["vs_id"]: vs["name"] for vs in available_vs}
+                            current_vs = vs_id_to.get(corpus.get("vector_store_id", ""), "(none)")
 
-                            fc1, fc2, _ = st.columns([1, 1, 4])
-                            with fc1:
-                                if st.button("Yes, flush", type="primary", key=f"flush_confirm_{sel_id}"):
-                                    with st.spinner("Flushing vector store…"):
-                                        try:
-                                            from pipeline.review import flush_corpus
-                                            fresult = flush_corpus(corpus_id=sel_id)
-                                            st.success(
-                                                f"Flushed **{fresult.get('flushed_docs', 0)}** doc(s) — "
-                                                f"**{fresult.get('flushed_chunks', 0):,}** chunks removed."
-                                            )
-                                            if fresult.get("errors"):
-                                                for err in fresult["errors"]:
-                                                    st.error(err)
-                                        except Exception as exc:
-                                            st.error(f"Flush failed: {exc}")
-                                    st.session_state[flush_key] = False
-                                    _invalidate(sel_id)
-                                    st.rerun()
-                            with fc2:
-                                if st.button("Cancel", key=f"flush_cancel_{sel_id}"):
-                                    st.session_state[flush_key] = False
-                                    st.rerun()
+                            push_vs_name = st.selectbox(
+                                "Target vector store",
+                                options=list(vs_opts.keys()),
+                                index=list(vs_opts.keys()).index(current_vs) if current_vs in vs_opts else 0,
+                                key=f"push_vs_{sel_id}",
+                            )
+                            if st.button("🚀 Push to vector store", key=f"push_btn_{sel_id}"):
+                                vs_id = vs_opts[push_vs_name]
+                                # Save vector store choice
+                                from pipeline.mongo_store import get_corpus_store
+                                get_corpus_store().update(corpus_id=sel_id, vector_store_id=vs_id)
+                                with st.spinner("Embedding and pushing…"):
+                                    try:
+                                        from pipeline.review import push_approved
+                                        result = push_approved(corpus_id=sel_id)
+                                        st.success(
+                                            f"Pushed **{result.get('pushed_docs', 0)}** document(s) — "
+                                            f"**{result.get('pushed_chunks', 0):,}** sections indexed."
+                                        )
+                                        if result.get("errors"):
+                                            for err in result["errors"]:
+                                                st.error(err)
+                                        _invalidate(sel_id)
+                                        st.rerun()
+                                    except Exception as exc:
+                                        st.error(f"Push failed: {exc}")

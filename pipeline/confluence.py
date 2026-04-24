@@ -153,9 +153,11 @@ class ConfluenceCrawler:
         api_token: str = "",
         timeout: int = 30,
         verify_ssl: bool = True,
+        strip_wiki_prefix: bool = False,
     ) -> None:
-        self.base_url  = base_url.rstrip("/")
-        self.auth_type = auth_type.lower()
+        self.base_url          = base_url.rstrip("/")
+        self.auth_type         = auth_type.lower()
+        self.strip_wiki_prefix = strip_wiki_prefix
 
         if not verify_ssl:
             import urllib3
@@ -198,7 +200,8 @@ class ConfluenceCrawler:
     def _page_url(self, page_id: str, space_key: str, title: str) -> str:
         """Build the canonical web URL for a page."""
         slug = title.replace(" ", "+")
-        return f"{self.base_url}/wiki/spaces/{space_key}/pages/{page_id}/{slug}"
+        path_prefix = "" if self.strip_wiki_prefix else "/wiki"
+        return f"{self.base_url}{path_prefix}/spaces/{space_key}/pages/{page_id}/{slug}"
 
     # ------------------------------------------------------------------
     # Record parsing

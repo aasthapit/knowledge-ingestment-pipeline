@@ -33,14 +33,12 @@ pg = st.navigation(
         "Review": [
             st.Page("pages/review.py",       title="Review Queue",     icon="📋"),
         ],
-        "Knowledge Base": [
-            st.Page("pages/corpus.py",           title="Corpus",           icon="📦"),
-            st.Page("pages/vector_stores.py",    title="Vector Stores",    icon="🗄️"),
-            st.Page("pages/search.py",           title="Search",           icon="🔎"),
-            st.Page("pages/drift.py",            title="KB Health",        icon="🔍"),
-            st.Page("pages/ledger.py",           title="Ledger",           icon="📒"),
-            st.Page("pages/manifests.py",        title="Manifests",        icon="📑"),
-            st.Page("pages/status.py",           title="Status",           icon="⚙️"),
+        "Data Management": [
+            st.Page("pages/corpus.py",    title="Corpus",    icon="📦"),
+            st.Page("pages/ledger.py",    title="Ledger",    icon="📒"),
+            st.Page("pages/manifests.py", title="Manifests", icon="📑"),
+            st.Page("pages/drift.py",     title="KB Health", icon="🔍"),
+            st.Page("pages/status.py",    title="Status",    icon="⚙️"),
         ],
     }
 )

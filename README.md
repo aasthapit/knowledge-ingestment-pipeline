@@ -1,19 +1,19 @@
 # Knowledge Ingestion Pipeline
 
-A tool for building and maintaining AI knowledge bases. It takes documents from various sources — PDFs, Word files, web pages, Confluence wikis, JSONL exports — converts them into a searchable format, and gives you a review step before anything reaches your AI agents.
+A tool for preparing and managing AI knowledge base content. It takes documents from various sources — Confluence wikis, PDFs, Word files, web pages, JSONL exports — converts them into clean, reviewable chunks, and lets you download the results as JSONL for use in any downstream system.
 
 ```mermaid
 flowchart LR
     subgraph src["① Sources"]
         direction TB
-        C["🔗 Confluence\npage tree"]
+        C["🔗 Confluence\npage tree(s)"]
         J["📦 JSONL\nfile upload"]
         D["📄 PDF · Word\nHTML · URL"]
     end
 
     subgraph kb["② Knowledge Base"]
         direction TB
-        KB[("Named source\nconfluence | jsonl")]
+        KB[("Named source\nconfluence | jsonl | web | file")]
     end
 
     subgraph stage["③ Staging"]
@@ -31,15 +31,10 @@ flowchart LR
         ED["✏️ Edit / Split"]
     end
 
-    subgraph corpus["⑤ Corpus"]
+    subgraph out["⑤ Export"]
         direction TB
-        CO["usecase_id\nagent_filter\nvector_store"]
-    end
-
-    subgraph vdb["⑥ Vector DB"]
-        direction TB
-        RD[("Redis\nStack")]
-        CU[("Custom\nHTTP DB")]
+        CO["Corpus\n(grouped KBs)"]
+        DL["⬇️ Download JSONL"]
     end
 
     C & J & D --> KB
@@ -49,23 +44,22 @@ flowchart LR
     QC -- "flagged" --> RQ
     AP & RQ --> OK
     OK --> CO
-    CO -- "push" --> RD
-    CO -- "push" --> CU
+    CO --> DL
 ```
 
 ---
 
 ## What problem does this solve?
 
-Most approaches to AI knowledge bases work like this: dump your documents in, embed them all, run a search. That works for demos but becomes unmanageable quickly — stale content accumulates, low-quality chunks degrade search results, and you have no record of what's actually in the index or when it was last updated.
+Building reliable AI knowledge bases is harder than it looks. Raw documents have noise: navigation menus, empty headings, stale pages, boilerplate footers. Without a review step, all of that ends up in your context windows.
 
-This pipeline adds structure around that process:
+This pipeline adds structure around content preparation:
 
-- **Review before publish** — nothing reaches the AI until a human (or the quality checker) has signed off
-- **Track everything** — every document has a record: what was ingested, when, by whom, for which corpus
-- **Detect drift** — for Confluence sources, the system checks whether pages have changed since the last crawl and flags what needs refreshing
-- **Scope by corpus** — content is organised into corpora, each carrying a use case ID and agent filter, so search results can be filtered to the right context
-- **Target any vector DB** — each corpus can push to the built-in Redis index or a custom vector DB endpoint
+- **Review before export** — nothing goes into your JSONL until a human (or the quality checker) has signed off
+- **Track everything** — every document has a record: what was ingested, when, from which source, for which corpus
+- **Detect drift** — for Confluence sources, the system flags pages that have changed since the last crawl
+- **Scope by corpus** — group Knowledge Bases into named corpora; download all their content as a single JSONL in one click
+- **Vector DB optional** — the primary output is JSONL you can feed to any embedding pipeline; pushing to a vector store is an optional advanced step
 
 ---
 
@@ -73,38 +67,45 @@ This pipeline adds structure around that process:
 
 ### Knowledge Base
 
-A named source of documents. Three types:
+A named source of documents. Four types:
 
-- **Confluence** — one or more parent page URLs; the built-in crawler fetches the full page tree
+- **Confluence** — one or more registered page trees, each with an optional description and tags; the built-in crawler fetches the full tree for all registered sources
 - **JSONL** — a manually uploaded `.jsonl` file
 - **Web** — output from an external web crawler delivered as JSONL; the pipeline does not crawl, you bring the data
+- **File** — PDFs, DOCX, HTML, and other documents uploaded via the Add Document page
 
 A Knowledge Base has no use case or agent context — it is purely a source container. One KB can belong to many corpora.
+
+### Confluence Sources
+
+Each Confluence KB stores a list of sources, not just a single URL:
+
+```json
+{
+  "url": "https://company.atlassian.net/wiki/spaces/OPS/pages/123/Runbooks",
+  "description": "Operational runbooks",
+  "tags": ["ops", "runbooks"]
+}
+```
+
+Tags are applied to every page crawled from that source. The KB page lets you add, remove, and refresh sources independently.
 
 ### Data Corpus
 
 A named collection of Knowledge Bases. The corpus carries:
 
-- `usecase_id` — the business use case this content supports (e.g. `GENAI1597_SSOP`)
-- `agent_filter` — the specific AI agent or persona this content is for
-- `vector_store_id` — which vector DB to push to (built-in Redis or a custom endpoint)
+- `usecase_id` — the business use case this content supports (optional)
+- `agent_filter` — the specific AI agent or persona this content is for (optional)
 
-When you push a corpus, the pipeline reads from all its KBs' staged documents, embeds them, and writes to the configured vector store.
-
-### Vector Store
-
-A registered vector DB target. Two types:
-
-- **Redis** (built-in default) — uses the Redis Stack instance configured in your `.env`
-- **Custom** — any vector DB that accepts HTTP requests; you provide the base URL, API key, and collection name
+Download all staged content from a corpus's KBs as a single JSONL file from the **Export** tab. Pushing to a vector store is an optional advanced step.
 
 ### Staging Store
 
-A holding area for documents before they are pushed. Documents are scoped to a Knowledge Base (`kb_id`). The review queue lets you inspect, edit, approve, or reject staged documents before they go live.
+A holding area for documents before they are exported. Documents are scoped to a Knowledge Base (`kb_id`). The review queue lets you inspect, edit, approve, or reject staged documents before exporting.
 
 ### Manifest
 
-A frozen, corpus-scoped snapshot of all pushed JSONL documents at a point in time. Manifests let you:
+A frozen, corpus-scoped snapshot of all staged/pushed documents at a point in time. Manifests let you:
 
 - Record exactly which sources were in a corpus at a given version
 - Diff two manifests to see what changed
@@ -123,9 +124,8 @@ erDiagram
     KnowledgeBase {
         string kb_id PK
         string name
-        string source_type "confluence | jsonl"
-        string[] confluence_urls
-        string file_ref
+        string source_type "confluence | jsonl | web | file"
+        object[] confluence_sources "url + description + tags"
         string status "empty | staging | ready"
     }
     DataCorpus {
@@ -134,14 +134,7 @@ erDiagram
         string usecase_id
         string agent_filter
         string[] kb_ids FK
-        string vector_store_id FK
-    }
-    VectorStoreConfig {
-        string vs_id PK
-        string name
-        string type "redis | custom"
-        string endpoint
-        string collection
+        string vector_store_id "optional"
     }
     StagingDoc {
         string doc_id PK
@@ -160,8 +153,8 @@ erDiagram
     KBLedger {
         string doc_id PK
         string kb_id FK
-        string usecase_id "from corpus at push time"
-        string agent_filter "from corpus at push time"
+        string usecase_id
+        string agent_filter
         int chunk_count
     }
 
@@ -169,7 +162,6 @@ erDiagram
     KnowledgeBase ||--o{ KBLedger : "records pushes"
     DataCorpus }o--o{ KnowledgeBase : "contains (many-to-many)"
     DataCorpus ||--o{ Manifest : "snapshots"
-    DataCorpus }o--|| VectorStoreConfig : "targets"
 ```
 
 ---
@@ -185,8 +177,8 @@ sequenceDiagram
     participant Corp as Corpus
     participant VDB as Vector DB
 
-    U->>KB: Create KB (Confluence URLs or JSONL)
-    U->>KB: Trigger crawl / upload file
+    U->>KB: Create KB (Confluence sources or JSONL)
+    U->>KB: Trigger crawl / upload file  (or Refresh KB button)
 
     KB->>Stage: Enqueue docs tagged with kb_id
     Stage-->>Stage: Chunk + quality-check each doc
@@ -198,17 +190,16 @@ sequenceDiagram
         U->>Rev: Inspect · approve · reject · edit
     end
 
-    note over Rev,Corp: Approved docs wait until a corpus push is triggered
+    note over Rev,Corp: Approved docs are ready to export
 
-    U->>Corp: Select corpus (usecase + agent + vector store)
-    U->>Corp: Push
+    U->>Corp: Select corpus (groups KBs by use case)
+    U->>Corp: Download JSONL  (or push to vector store)
 
-    Corp->>Stage: Fetch approved docs whose kb_id is in corpus.kb_ids
-    Corp->>VDB: Embed chunks + upsert vectors
-    Corp-->>Stage: Mark docs as pushed
+    Corp->>Stage: Fetch chunks from all corpus KB IDs
+    Corp-->>U: JSONL file download
     Corp-->>Stage: Write entry to KB Ledger
 
-    note over VDB: AI agents now query this index,\nfiltered by usecase_id / agent_filter
+    note over Corp: Feed JSONL to any embedding pipeline
 ```
 
 ---
@@ -275,7 +266,7 @@ The first thing you see. Shows how many documents are waiting for review, approv
 
 Create and manage knowledge bases — the sources that feed your corpora.
 
-**Confluence KB** — provide one or more parent page URLs and set a crawl depth. The KB records the connection so it can be refreshed on a schedule.
+**Confluence KB** — register one or more parent page URLs, each with an optional description and tags. The KB detail page shows all registered sources in a table; you can add, remove, and re-order them. Hit **🔄 Refresh KB** to clear the current staged content and re-crawl all sources in one click. Source URLs, descriptions, and tags are stored per-entry so different page trees can carry different metadata.
 
 **JSONL KB** — upload a `.jsonl` file (one JSON object per line). The importer auto-detects the data format and shows a preview before importing. Custom field mappings let you import from any source without changing your data.
 
@@ -289,6 +280,8 @@ Create and manage knowledge bases — the sources that feed your corpora.
 | `url` | Generic fallback |
 
 Text content should be in a `text` or `content` field. If your crawler uses different field names, use the **Field mapper** on the import page or save a named schema in `schemas.yaml`.
+
+Both the **Staged documents** and **Pushed documents** tabs on the KB detail page include a **⬇️ Download JSONL** button to export all chunks for that KB.
 
 ---
 
@@ -306,7 +299,13 @@ Three ways to stage content under a Knowledge Base:
 
 ### Confluence
 
-Connects directly to Confluence (Cloud or Server/Data Center) and crawls a page tree. You select a Knowledge Base of type `confluence` (or create one), then provide the URL of a parent page and it fetches all child pages automatically.
+Connects directly to Confluence (Cloud or Server/Data Center) and crawls page trees. Select a Knowledge Base to see all its registered sources with checkboxes — crawl all of them at once or select a subset. A one-off URL expander lets you crawl a page tree without registering it permanently.
+
+Options:
+- **Strip `/wiki` from source URLs** (default on) — removes the `/wiki` path segment from source URLs in the JSONL output, useful when your Confluence links don't include it
+- **Extra tags** — applied to every page crawled in this session, in addition to per-source tags
+
+Output modes: stage directly in the Review Queue, download as JSONL, or both. Output files are named `{kb_name}_{timestamp}.jsonl`.
 
 Crawled pages go through the same quality check and review workflow as any other document.
 
@@ -334,27 +333,11 @@ Actions per document:
 
 ### Corpus
 
-Organise Knowledge Bases into named corpora. Each corpus carries:
+Organise Knowledge Bases into named corpora. Each corpus optionally carries a use case ID and agent filter for scoping.
 
-- The KBs whose content it includes
-- A use case ID and agent filter (used to scope search results)
-- A target vector DB (Redis or custom)
+Primary action: **⬇️ Prepare corpus JSONL** (Export tab) — collects all staged chunks across the corpus's KBs and downloads them as a single `{corpus_name}_{timestamp}.jsonl` file. Choose to include all chunks, only approved, or only pushed.
 
-Push a corpus to embed and index all approved documents from its KBs.
-
----
-
-### Vector Stores
-
-Register and manage vector DB targets. The built-in Redis instance is always available. Add custom entries for any HTTP-compatible vector DB.
-
----
-
-### Search
-
-Semantic search over the knowledge base. Type a question in plain language and get back the most relevant sections, with source citations and page numbers.
-
-Filter by use case or agent to scope results to specific content. Filter by tags or document type.
+Vector store push is available as an advanced option for users who also want to index the content.
 
 ---
 
@@ -527,17 +510,17 @@ knowledge-ingestment-pipeline/
 │
 ├── pages/                    ← UI pages (one file per page)
 │   ├── home.py               ← Dashboard
-│   ├── kb.py                 ← Knowledge Base management
-│   ├── vector_stores.py      ← Vector store configuration
+│   ├── kb.py                 ← Knowledge Base management (multi-source, refresh, JSONL export)
 │   ├── ingest.py             ← Add Document (file, URL, JSONL)
-│   ├── confluence.py         ← Confluence crawler
-│   ├── corpus.py             ← Corpus management (KB collections + push)
+│   ├── confluence.py         ← Confluence crawler (multi-URL, strip /wiki)
+│   ├── corpus.py             ← Corpus management (KB groups + JSONL export)
 │   ├── review.py             ← Review Queue
-│   ├── search.py             ← Semantic search
 │   ├── drift.py              ← KB Health / drift detection
 │   ├── ledger.py             ← Ledger (pushed documents)
 │   ├── manifests.py          ← Document manifests (snapshot, diff, re-ingest)
-│   └── status.py             ← Connection status + configuration
+│   ├── status.py             ← Connection status + configuration
+│   ├── vector_stores.py      ← Vector store configuration (advanced)
+│   └── search.py             ← Semantic search (advanced)
 │
 ├── pipeline/                 ← Core library
 │   ├── config.py             ← Settings from .env
