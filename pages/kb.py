@@ -41,7 +41,7 @@ def _fmt_date(iso: str | None) -> str:
 
 
 STATUS_COLOR = {"empty": "gray", "staging": "orange", "ready": "green"}
-SOURCE_ICON  = {"confluence": "🔗", "jsonl": "📦", "web": "🌐"}
+SOURCE_ICON  = {"confluence": "🔗", "jsonl": "📦", "web": "🌐", "file": "📄"}
 
 # ── Connection guard ──────────────────────────────────────────────────────────
 
@@ -74,7 +74,7 @@ with left:
     with col_hd:
         st.subheader("Knowledge Bases")
     with col_btn:
-        if st.button("＋ New", use_container_width=True):
+        if st.button("＋ New", width="stretch"):
             st.session_state.kb_create_open = not st.session_state.kb_create_open
 
     # ── Create form ───────────────────────────────────────────────────────────
@@ -85,7 +85,7 @@ with left:
             new_desc = st.text_area("Description", height=60)
             new_type = st.radio(
                 "Source type",
-                ["confluence", "jsonl", "web"],
+                ["confluence", "jsonl", "web", "file"],
                 horizontal=True,
                 key="create_kb_type",
             )
@@ -114,6 +114,14 @@ with left:
                     "🌐 **Web KB** — run your own web crawler against these URLs, "
                     "export the results as JSONL, then import it on the **Add Document** page "
                     "and select this KB. Supported URL field names: `page_url`, `sourceURL`, `source_url`, `url`."
+                )
+            elif new_type == "file":
+                new_urls  = ""
+                new_depth = -1
+                new_cron  = ""
+                st.info(
+                    "📄 **File KB** — upload PDFs, DOCX, HTML, and other documents on the "
+                    "**Add Document** page and assign them to this KB."
                 )
             else:
                 new_urls  = ""
@@ -152,11 +160,11 @@ with left:
     # ── Type filter ───────────────────────────────────────────────────────────
     type_filter = st.segmented_control(
         "Filter",
-        ["All", "Confluence", "JSONL", "Web"],
+        ["All", "Confluence", "JSONL", "Web", "File"],
         default="All",
         label_visibility="collapsed",
     )
-    filter_map = {"All": None, "Confluence": "confluence", "JSONL": "jsonl", "Web": "web"}
+    filter_map = {"All": None, "Confluence": "confluence", "JSONL": "jsonl", "Web": "web", "File": "file"}
     try:
         filtered_kbs = _load_kbs(source_type=filter_map.get(type_filter or "All"))
     except Exception:
@@ -173,7 +181,7 @@ with left:
             color  = STATUS_COLOR.get(status, "gray")
             label  = f"{icon} **{kb['name']}**  \n:{color}[{status}] · {len(kb.get('doc_ids') or [])} docs"
             btn_type = "primary" if st.session_state.kb_selected == kid else "secondary"
-            if st.button(label, key=f"sel_kb_{kid}", use_container_width=True, type=btn_type):
+            if st.button(label, key=f"sel_kb_{kid}", width="stretch", type=btn_type):
                 st.session_state.kb_selected = kid
                 st.session_state.kb_edit_open = False
                 st.rerun()
@@ -206,10 +214,10 @@ with right:
                 if kb.get("description"):
                     st.caption(kb["description"])
             with hd2:
-                if st.button("Edit", use_container_width=True):
+                if st.button("Edit", width="stretch"):
                     st.session_state.kb_edit_open = not st.session_state.kb_edit_open
             with hd3:
-                if st.button("Delete", use_container_width=True, type="secondary"):
+                if st.button("Delete", width="stretch", type="secondary"):
                     st.session_state[f"confirm_del_kb_{sel_id}"] = True
 
             if st.session_state.get(f"confirm_del_kb_{sel_id}"):
@@ -377,27 +385,58 @@ with right:
                     "To add more content, go to **Add Document → Bulk JSONL Import** and select this KB."
                 )
 
-            # ── Staging docs tab ──────────────────────────────────────────────
-            st.subheader("Staged documents")
-            try:
-                from pipeline.mongo_store import get_staging
-                staged = get_staging().list_all(kb_id=sel_id)
-                if not staged:
-                    st.info("No staged documents for this Knowledge Base yet.")
-                else:
-                    import pandas as pd
-                    rows = [
-                        {
-                            "Title":   d.get("title", "—"),
-                            "Status":  d.get("status", ""),
-                            "Chunks":  d.get("chunk_count", 0),
-                            "Score":   f"{float(d.get('quality_score', 0)):.0%}",
-                            "Staged":  _fmt_date(d.get("staged_at")),
-                            "doc_id":  d.get("doc_id", ""),
-                        }
-                        for d in staged
-                    ]
-                    df = pd.DataFrame(rows)
-                    st.dataframe(df.drop(columns=["doc_id"]), use_container_width=True, hide_index=True)
-            except Exception as exc:
-                st.warning(f"Could not load staged docs: {exc}")
+            # ── File details ──────────────────────────────────────────────────
+            elif source_type == "file":
+                st.info(
+                    "📄 Upload PDFs, DOCX, HTML, and other documents on the "
+                    "**Add Document** page and assign them to this KB."
+                )
+
+            # ── Tabs: Staged / Pushed ─────────────────────────────────────────
+            tab_staged, tab_pushed = st.tabs(["Staged documents", "Pushed documents"])
+
+            with tab_staged:
+                try:
+                    from pipeline.mongo_store import get_staging
+                    staged = get_staging().list_all(kb_id=sel_id)
+                    if not staged:
+                        st.info("No staged documents for this Knowledge Base yet.")
+                    else:
+                        import pandas as pd
+                        rows = [
+                            {
+                                "Title":   d.get("title", "—"),
+                                "Status":  d.get("status", ""),
+                                "Chunks":  d.get("chunk_count", 0),
+                                "Score":   f"{float(d.get('quality_score', 0)):.0%}",
+                                "Staged":  _fmt_date(d.get("staged_at")),
+                                "doc_id":  d.get("doc_id", ""),
+                            }
+                            for d in staged
+                        ]
+                        df = pd.DataFrame(rows)
+                        st.dataframe(df.drop(columns=["doc_id"]), hide_index=True)
+                except Exception as exc:
+                    st.warning(f"Could not load staged docs: {exc}")
+
+            with tab_pushed:
+                try:
+                    from pipeline.mongo_store import get_ledger
+                    pushed = get_ledger().list_docs(kb_name=kb.get("name", ""))
+                    if not pushed:
+                        st.info("No pushed documents for this Knowledge Base yet.")
+                    else:
+                        import pandas as pd
+                        rows_p = [
+                            {
+                                "Title":       d.get("title", "—"),
+                                "Source type": d.get("source_type", "—"),
+                                "Chunks":      d.get("chunk_count", 0),
+                                "Drift":       d.get("drift_status", "—"),
+                                "Pushed":      _fmt_date(d.get("pushed_at")),
+                            }
+                            for d in pushed
+                        ]
+                        st.dataframe(pd.DataFrame(rows_p), hide_index=True)
+                except Exception as exc:
+                    st.warning(f"Could not load pushed docs: {exc}")

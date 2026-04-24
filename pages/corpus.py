@@ -37,8 +37,15 @@ def _load_vs_configs() -> list[dict]:
     return get_vs_config_store().list_all()
 
 
+@st.cache_data(ttl=60)
+def _load_corpus_docs(corpus_id: str, kb_ids_tuple: tuple) -> list[dict]:
+    from pipeline.mongo_store import get_ledger
+    return get_ledger().list_docs_by_kb_ids(list(kb_ids_tuple))
+
+
 def _invalidate(corpus_id: str | None = None) -> None:
     _load_corpora.clear()
+    _load_corpus_docs.clear()
     if corpus_id:
         _load_corpus.clear()
 
@@ -85,7 +92,7 @@ with left:
     with col_hd:
         st.subheader("Corpora")
     with col_btn:
-        if st.button("＋ New", use_container_width=True):
+        if st.button("＋ New", width="stretch"):
             st.session_state.corpus_create_open = not st.session_state.corpus_create_open
             st.session_state.corpus_edit_open = False
 
@@ -161,7 +168,7 @@ with left:
             if c.get("usecase_id"):
                 label += f"  \nuc: `{c['usecase_id']}`"
             btn_type = "primary" if st.session_state.corpus_selected == cid else "secondary"
-            if st.button(label, key=f"sel_{cid}", use_container_width=True, type=btn_type):
+            if st.button(label, key=f"sel_{cid}", width="stretch", type=btn_type):
                 st.session_state.corpus_selected = cid
                 st.session_state.corpus_edit_open = False
                 st.rerun()
@@ -195,10 +202,10 @@ with right:
             with hd2:
                 btn1, btn2 = st.columns(2)
                 with btn1:
-                    if st.button("Edit", use_container_width=True):
+                    if st.button("Edit", width="stretch"):
                         st.session_state.corpus_edit_open = not st.session_state.corpus_edit_open
                 with btn2:
-                    if st.button("Delete", use_container_width=True, type="secondary"):
+                    if st.button("Delete", width="stretch", type="secondary"):
                         st.session_state[f"confirm_delete_{sel_id}"] = True
 
             if st.session_state.get(f"confirm_delete_{sel_id}"):
@@ -312,7 +319,7 @@ with right:
             st.divider()
 
             # ── Tabs ──────────────────────────────────────────────────────────
-            tab_kbs, tab_push = st.tabs(["Knowledge Bases", "Push"])
+            tab_kbs, tab_docs, tab_push = st.tabs(["Knowledge Bases", "Documents", "Push"])
 
             # ── KBs tab ───────────────────────────────────────────────────────
             with tab_kbs:
@@ -341,7 +348,7 @@ with right:
                                 "Staged docs": 0, "kb_id": kid,
                             })
                     df = pd.DataFrame(rows)
-                    st.dataframe(df.drop(columns=["kb_id"]), use_container_width=True, hide_index=True)
+                    st.dataframe(df.drop(columns=["kb_id"]), hide_index=True)
 
                     # Quick-remove KBs
                     kbs_to_remove = st.multiselect(
@@ -363,6 +370,45 @@ with right:
                             _invalidate(sel_id)
                             st.success(f"Removed {len(kbs_to_remove)} KB(s).")
                             st.rerun()
+
+            # ── Documents tab ─────────────────────────────────────────────────
+            with tab_docs:
+                corpus_kb_ids_tuple = tuple(sorted(corpus.get("kb_ids") or []))
+                try:
+                    pushed_docs_list = _load_corpus_docs(sel_id, corpus_kb_ids_tuple)
+                except Exception as exc:
+                    pushed_docs_list = []
+                    st.warning(f"Could not load pushed documents: {exc}")
+
+                if not pushed_docs_list:
+                    st.info("No pushed documents in this corpus yet. Push the corpus first.")
+                else:
+                    search_q = st.text_input(
+                        "Filter by title or source",
+                        placeholder="Search…",
+                        key=f"doc_search_{sel_id}",
+                    )
+                    import pandas as pd
+                    rows_d = [
+                        {
+                            "Title":       d.get("title", "—"),
+                            "KB":          d.get("kb_name", "—"),
+                            "Source type": d.get("source_type", "—"),
+                            "Chunks":      d.get("chunk_count", 0),
+                            "Drift":       d.get("drift_status", "—"),
+                            "Pushed":      _fmt_date(d.get("pushed_at")),
+                        }
+                        for d in pushed_docs_list
+                    ]
+                    df_d = pd.DataFrame(rows_d)
+                    if search_q:
+                        mask = (
+                            df_d["Title"].str.contains(search_q, case=False, na=False)
+                            | df_d["KB"].str.contains(search_q, case=False, na=False)
+                        )
+                        df_d = df_d[mask]
+                    st.caption(f"{len(df_d)} document(s)")
+                    st.dataframe(df_d, hide_index=True)
 
             # ── Push tab ──────────────────────────────────────────────────────
             with tab_push:
@@ -394,3 +440,54 @@ with right:
                                     st.rerun()
                                 except Exception as exc:
                                     st.error(f"Push failed: {exc}")
+
+                    st.divider()
+                    with st.expander("⚠️ Danger zone"):
+                        st.markdown(
+                            "**Flush vector store** — removes all indexed chunks for this corpus "
+                            "from **{vs_name}**. Ledger records are preserved; you can re-push afterwards.".format(vs_name=vs_name)
+                        )
+
+                        flush_key = f"confirm_flush_{sel_id}"
+                        if not st.session_state.get(flush_key):
+                            if st.button("🗑️ Flush vector store", key=f"flush_btn_{sel_id}"):
+                                st.session_state[flush_key] = True
+                                st.rerun()
+                        else:
+                            try:
+                                from pipeline.mongo_store import get_ledger
+                                preview_docs = get_ledger().list_docs_by_kb_ids(
+                                    corpus.get("kb_ids") or [], limit=10_000
+                                )
+                                total_chunks = sum(len(d.get("chunk_ids") or []) for d in preview_docs)
+                                st.warning(
+                                    f"This will delete **{total_chunks:,}** chunks across "
+                                    f"**{len(preview_docs)}** document(s) from **{vs_name}**. "
+                                    "Ledger records are preserved. You can re-push afterwards."
+                                )
+                            except Exception:
+                                st.warning(f"This will delete all indexed chunks from **{vs_name}**.")
+
+                            fc1, fc2, _ = st.columns([1, 1, 4])
+                            with fc1:
+                                if st.button("Yes, flush", type="primary", key=f"flush_confirm_{sel_id}"):
+                                    with st.spinner("Flushing vector store…"):
+                                        try:
+                                            from pipeline.review import flush_corpus
+                                            fresult = flush_corpus(corpus_id=sel_id)
+                                            st.success(
+                                                f"Flushed **{fresult.get('flushed_docs', 0)}** doc(s) — "
+                                                f"**{fresult.get('flushed_chunks', 0):,}** chunks removed."
+                                            )
+                                            if fresult.get("errors"):
+                                                for err in fresult["errors"]:
+                                                    st.error(err)
+                                        except Exception as exc:
+                                            st.error(f"Flush failed: {exc}")
+                                    st.session_state[flush_key] = False
+                                    _invalidate(sel_id)
+                                    st.rerun()
+                            with fc2:
+                                if st.button("Cancel", key=f"flush_cancel_{sel_id}"):
+                                    st.session_state[flush_key] = False
+                                    st.rerun()

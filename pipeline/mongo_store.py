@@ -8,7 +8,7 @@ Classes:
   UsecaseLedger         — per-usecase/agent chunk inventory + Confluence sources
   CorpusStore           — named corpora (collections of KBs with usecase context)
   KnowledgeBaseStore    — named knowledge bases (Confluence, JSONL, or web-crawler sources)
-  VectorStoreConfigStore— registered vector DB targets (Redis or custom)
+  get_vs_config_store()  — delegates to pipeline.vs_config (YAML-backed)
 """
 from __future__ import annotations
 
@@ -695,6 +695,29 @@ class KBLedger:
     ) -> list[dict[str, Any]]:
         """Return kb_documents records for a specific usecase+agent pair (newest first)."""
         query: dict[str, Any] = {"usecase_id": usecase_id, "agent_filter": agent_filter}
+        results = []
+        for doc in self._coll.find(
+            query,
+            sort=[("pushed_at", DESCENDING)],
+            limit=limit,
+        ):
+            doc["doc_id"] = doc.pop("_id")
+            for key in ("pushed_at", "drift_checked_at"):
+                val = doc.get(key)
+                if isinstance(val, datetime):
+                    doc[key] = val.isoformat()
+            results.append(doc)
+        return results
+
+    def list_docs_by_kb_ids(
+        self,
+        kb_ids: list[str],
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Return kb_documents records for all docs whose kb_id is in kb_ids (newest first)."""
+        if not kb_ids:
+            return []
+        query: dict[str, Any] = {"kb_id": {"$in": kb_ids}}
         results = []
         for doc in self._coll.find(
             query,
@@ -1484,134 +1507,7 @@ def get_kb_store() -> KnowledgeBaseStore:
 
 
 # ---------------------------------------------------------------------------
-# VectorStoreConfigStore — registered vector DB targets
-# ---------------------------------------------------------------------------
-
-class VectorStoreConfigStore:
-    """
-    Stores vector DB connection configs that corpora can target at push time.
-
-    ``type: "redis"`` — uses the existing pipeline Redis config (no extra fields).
-    ``type: "custom"`` — user-supplied endpoint, api_key, collection, extras.
-
-    A built-in record with ``_id = "default"`` always represents the pipeline's
-    configured Redis instance and cannot be deleted.
-
-    Collection: ``vector_stores``
-    """
-
-    _DEFAULT_ID = "default"
-
-    def __init__(self, db: Database | None = None) -> None:
-        self._db: Database = db or _get_db()
-        self._coll: Collection = self._db[_coll_name(settings.mongodb_coll_vector_stores)]
-        self._ensure_indexes()
-        self._ensure_default()
-
-    def _ensure_indexes(self) -> None:
-        self._coll.create_index("name", unique=True)
-        self._coll.create_index("type")
-
-    def _ensure_default(self) -> None:
-        """Upsert the built-in Redis entry so it always exists."""
-        now = datetime.now(timezone.utc)
-        self._coll.update_one(
-            {"_id": self._DEFAULT_ID},
-            {"$setOnInsert": {
-                "_id":        self._DEFAULT_ID,
-                "name":       "Default (Redis)",
-                "type":       "redis",
-                "endpoint":   "",
-                "api_key":    "",
-                "collection": settings.redis_index_name,
-                "extra":      {},
-                "created_at": now,
-            }},
-            upsert=True,
-        )
-
-    def create(
-        self,
-        name: str,
-        vs_type: str,
-        endpoint: str = "",
-        api_key: str = "",
-        collection: str = "",
-        extra: dict | None = None,
-    ) -> str:
-        if vs_type not in ("redis", "custom", "tachyon"):
-            raise ValueError(f"vs_type must be 'redis', 'custom', or 'tachyon', got {vs_type!r}")
-        now = datetime.now(timezone.utc)
-        vs_id = str(uuid.uuid4())
-        self._coll.insert_one({
-            "_id":        vs_id,
-            "name":       name,
-            "type":       vs_type,
-            "endpoint":   endpoint,
-            "api_key":    api_key,
-            "collection": collection,
-            "extra":      extra or {},
-            "created_at": now,
-        })
-        return vs_id
-
-    def update(
-        self,
-        vs_id: str,
-        name: str | None = None,
-        endpoint: str | None = None,
-        api_key: str | None = None,
-        collection: str | None = None,
-        extra: dict | None = None,
-    ) -> None:
-        if vs_id == self._DEFAULT_ID:
-            raise ValueError("The default Redis config cannot be modified.")
-        fields: dict[str, Any] = {}
-        if name is not None:
-            fields["name"] = name
-        if endpoint is not None:
-            fields["endpoint"] = endpoint
-        if api_key is not None:
-            fields["api_key"] = api_key
-        if collection is not None:
-            fields["collection"] = collection
-        if extra is not None:
-            fields["extra"] = extra
-        if fields:
-            self._coll.update_one({"_id": vs_id}, {"$set": fields})
-
-    def get(self, vs_id: str) -> dict[str, Any] | None:
-        doc = self._coll.find_one({"_id": vs_id})
-        return self._serialize(doc) if doc else None
-
-    def list_all(self) -> list[dict[str, Any]]:
-        results = []
-        for doc in self._coll.find({}, sort=[("created_at", ASCENDING)]):
-            results.append(self._serialize(doc))
-        return results
-
-    def delete(self, vs_id: str) -> None:
-        if vs_id == self._DEFAULT_ID:
-            raise ValueError("The default Redis config cannot be deleted.")
-        self._coll.delete_one({"_id": vs_id})
-
-    @staticmethod
-    def _serialize(doc: dict[str, Any]) -> dict[str, Any]:
-        vs_id = doc.pop("_id", None)
-        doc["vs_id"] = vs_id
-        doc["is_default"] = (vs_id == VectorStoreConfigStore._DEFAULT_ID)
-        created_at = doc.get("created_at")
-        if isinstance(created_at, datetime):
-            doc["created_at"] = created_at.isoformat()
-        return doc
-
-
-_vs_config_store: VectorStoreConfigStore | None = None
-
-
-def get_vs_config_store() -> VectorStoreConfigStore:
-    """Return (or create) the shared VectorStoreConfigStore instance."""
-    global _vs_config_store
-    if _vs_config_store is None:
-        _vs_config_store = VectorStoreConfigStore()
-    return _vs_config_store
+def get_vs_config_store():  # type: ignore[return]
+    """Return the YAML-backed vector store config (delegates to pipeline.vs_config)."""
+    from pipeline.vs_config import get_vs_config_store as _get
+    return _get()

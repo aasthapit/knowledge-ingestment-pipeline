@@ -1,0 +1,49 @@
+# Vector store configurations.
+#
+# Each entry requires:
+#   id:         unique key — must match vector_store_id stored in corpora
+#   name:       display name shown in the UI
+#   type:       redis | custom | tachyon
+#
+# String values may reference environment variables using ${VAR_NAME} syntax.
+# Secrets (URLs, API keys) should always be kept in .env, not hard-coded here.
+#
+# After editing this file, restart the Streamlit app to pick up changes.
+
+vector_stores:
+
+  # ── Built-in Redis (matches REDIS_URL / REDIS_INDEX_NAME from .env) ──────────
+  - id: default
+    name: Default Redis
+    type: redis
+    collection: ${REDIS_INDEX_NAME}
+    extra:
+      redis_url: ${REDIS_URL}
+      index_name: ${REDIS_INDEX_NAME}
+      key_prefix: ${REDIS_KEY_PREFIX}
+
+  # ── Example: second Redis instance ───────────────────────────────────────────
+  # - id: staging-redis
+  #   name: Staging Redis
+  #   type: redis
+  #   collection: staging_index
+  #   extra:
+  #     redis_url: ${REDIS_STAGING_URL}
+  #     index_name: staging_index
+  #     key_prefix: "stg:"
+
+  # ── Example: custom HTTP vector store ────────────────────────────────────────
+  # - id: my-custom-store
+  #   name: Production Custom Store
+  #   type: custom
+  #   endpoint: ${VS_ENDPOINT}
+  #   api_key: ${VS_API_KEY}
+  #   collection: my_collection
+
+  # ── Example: Tachyon (internal GenAI service) ─────────────────────────────────
+  # - id: tachyon-prod
+  #   name: Tachyon Production
+  #   type: tachyon
+  #   endpoint: ${TACHYON_ENDPOINT}
+  #   api_key: ${TACHYON_API_KEY}
+  #   collection: ${TACHYON_COLLECTION}

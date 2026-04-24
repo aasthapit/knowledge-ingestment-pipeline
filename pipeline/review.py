@@ -379,3 +379,62 @@ def push_approved(
         "pushed_chunks": pushed_chunks,
         "errors":        errors,
     }
+
+
+def flush_corpus(corpus_id: str) -> dict[str, Any]:
+    """
+    Delete all vector store chunks that belong to this corpus's KBs.
+
+    Ledger records in kb_documents are preserved so the push history is intact
+    and the corpus can be re-pushed afterwards.
+
+    Returns
+    -------
+    dict
+        ``{"flushed_docs": int, "flushed_chunks": int, "errors": list}``
+    """
+    from pipeline.vector_store import get_vector_store_client
+
+    cs       = mongo_store.get_corpus_store()
+    vs_store = mongo_store.get_vs_config_store()
+    ledger   = mongo_store.get_ledger()
+
+    corpus = cs.get(corpus_id)
+    if not corpus:
+        return {"flushed_docs": 0, "flushed_chunks": 0, "errors": [f"Corpus {corpus_id} not found."]}
+
+    kb_ids = corpus.get("kb_ids") or []
+    vs_id  = corpus.get("vector_store_id") or None
+
+    vs_config = vs_store.get(vs_id) if vs_id else None
+    if not vs_config:
+        return {
+            "flushed_docs": 0, "flushed_chunks": 0,
+            "errors": ["No vector store configured for this corpus."],
+        }
+
+    docs = ledger.list_docs_by_kb_ids(kb_ids, limit=10_000)
+    if not docs:
+        return {"flushed_docs": 0, "flushed_chunks": 0, "errors": []}
+
+    all_chunk_ids: list[str] = []
+    for d in docs:
+        all_chunk_ids.extend(d.get("chunk_ids") or [])
+
+    errors: list[str] = []
+    try:
+        vector_client = get_vector_store_client(vs_config)
+        vector_client.delete_chunks(all_chunk_ids)
+        logger.info(
+            "Flush corpus %s: deleted %d chunks from %d docs.",
+            corpus_id, len(all_chunk_ids), len(docs),
+        )
+    except Exception as exc:
+        logger.error("flush_corpus failed: %s", exc, exc_info=True)
+        errors.append(str(exc))
+
+    return {
+        "flushed_docs":   len(docs),
+        "flushed_chunks": len(all_chunk_ids),
+        "errors":         errors,
+    }
