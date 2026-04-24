@@ -429,8 +429,6 @@ def query_vectorstore(
     agent_filter: Optional agent label for downstream filtering.
     """
     settings.validate()
-    vectors = embedder.embed_texts([question])
-    vec = vectors[0]
 
     all_tags = list(tag_filter or [])
     if source_type:
@@ -442,13 +440,25 @@ def query_vectorstore(
         from pipeline.vector_store import get_vector_store_client
         vs_config = get_vs_config_store().get(vs_id) or {}
         client = get_vector_store_client(vs_config)
-        results = client.search(
-            vec, top_k=top_k, tag_filter=redis_tag_filter, agent_filter=agent_filter
-        )
+        if client.handles_own_embedding:
+            # Text-based backend (e.g. Tachyon) — skip local embedding, pass raw text.
+            results = client.search(
+                query_vector=[],
+                top_k=top_k,
+                tag_filter=redis_tag_filter,
+                agent_filter=agent_filter,
+                query_text=question,
+            )
+        else:
+            vectors = embedder.embed_texts([question])
+            results = client.search(
+                vectors[0], top_k=top_k, tag_filter=redis_tag_filter, agent_filter=agent_filter
+            )
     else:
         # Default: built-in Redis
         from pipeline import redis_store
-        results = redis_store.search(vec, top_k=top_k, tag_filter=redis_tag_filter)
+        vectors = embedder.embed_texts([question])
+        results = redis_store.search(vectors[0], top_k=top_k, tag_filter=redis_tag_filter)
 
     for r in results:
         raw = float(r.get("score", 1.0))

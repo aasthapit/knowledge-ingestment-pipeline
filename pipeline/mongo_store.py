@@ -472,6 +472,8 @@ class KBLedger:
         kb_name: str = "default",
         usecase_id: str | None = None,
         agent_filter: str | None = None,
+        s3_file_id: str | None = None,
+        vector_file_id: str | None = None,
     ) -> None:
         """
         Record (or update) a document in the ledger after a successful push.
@@ -511,6 +513,8 @@ class KBLedger:
             "drift_checked_at": None,
             "source_mtime":    source_mtime,
             "source_size":     source_size,
+            "s3_file_id":      s3_file_id or None,
+            "vector_file_id":  vector_file_id or None,
         }
 
         self._coll.replace_one({"_id": doc_id}, record, upsert=True)

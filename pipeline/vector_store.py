@@ -53,8 +53,13 @@ class VectorStoreClient(ABC):
         usecase_id: str | None = None,
         agent_filter: str | None = None,
         source_type: str | None = None,
+        query_text: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Vector similarity search; returns list of result dicts."""
+        """Vector similarity search; returns list of result dicts.
+
+        query_text is used by backends that embed server-side (handles_own_embedding=True).
+        Vector backends ignore it.
+        """
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +117,7 @@ class RedisVectorStore(VectorStoreClient):
         usecase_id: str | None = None,
         agent_filter: str | None = None,
         source_type: str | None = None,
+        query_text: str | None = None,
     ) -> list[dict[str, Any]]:
         # tag_filter here may be a pre-built RediSearch filter string or a list
         tf = tag_filter if isinstance(tag_filter, str) else (
@@ -197,6 +203,7 @@ class CustomVectorStore(VectorStoreClient):
         usecase_id: str | None = None,
         agent_filter: str | None = None,
         source_type: str | None = None,
+        query_text: str | None = None,
     ) -> list[dict[str, Any]]:
         body: dict[str, Any] = {
             "collection": self._collection,
@@ -224,42 +231,64 @@ class CustomVectorStore(VectorStoreClient):
 
 class TachyonVectorStore(VectorStoreClient):
     """
-    Skeleton client for the internal Tachyon GenAI service.
+    Client for the internal Tachyon GenAI service.
 
-    Tachyon handles file upload AND vectorization itself, so the embedding
-    step is skipped entirely when this backend is in use.
+    Tachyon handles its own vectorization — local embedding is skipped.
+    Auth uses Apigee OAuth (consumer_key + consumer_secret) plus mTLS certs.
+    Separate URLs are configured for search and completion.
 
-    All methods are stubbed — fill in real HTTP calls once the Tachyon API
-    contract is finalised.
+    Ingestion (JSONL → S3 → vectorize) is handled by the ingestion plan;
+    upsert_chunks and delete_chunks are wired there.
     """
 
     handles_own_embedding: bool = True
 
     def __init__(self, endpoint: str, api_key: str, collection: str, extra: dict) -> None:
-        self._endpoint   = endpoint.rstrip("/")
-        self._api_key    = api_key
-        self._collection = collection
-        self._extra      = extra
+        self._collection      = collection
+        self._consumer_key    = extra.get("consumer_key", "")
+        self._consumer_secret = extra.get("consumer_secret", "")
+        self._api_key         = api_key or extra.get("api_key", "")
+        self._usecase_id      = extra.get("usecase_id", "")
+        self._apigee_url      = extra.get("apigee_url", "")
+        self._search_url      = extra.get("search_url", "")
+        self._completion_url  = extra.get("completion_url", "")
+        cert_path             = extra.get("cert_path")
+        key_path              = extra.get("key_path")
+        self._cert            = (cert_path, key_path) if cert_path and key_path else None
+        self._ca_bundle       = extra.get("ca_bundle")
+
+        from pipeline.tachyon_client import TachyonClient
+        self._client = TachyonClient({
+            "consumer_key":    self._consumer_key,
+            "consumer_secret": self._consumer_secret,
+            "api_key":         self._api_key,
+            "usecase_id":      self._usecase_id,
+            "apigee_url":      self._apigee_url,
+            "search_url":      self._search_url,
+            "completion_url":  self._completion_url,
+            "cert":            self._cert,
+            "ca_bundle":       self._ca_bundle,
+        })
 
     def ensure_index(self) -> None:
-        # Tachyon manages its own collections; no explicit index creation needed.
-        logger.debug("TachyonVectorStore: index management delegated to Tachyon service.")
+        # Tachyon manages its own collections; no index creation needed here.
+        logger.debug("TachyonVectorStore: collection management delegated to Tachyon.")
 
     def upsert_chunks(self, chunks: list[Chunk], vectors: list[list[float]]) -> None:
-        # vectors are ignored — Tachyon embeds from raw content
+        # Ingestion for Tachyon goes through S3 → vectorize (ingestion plan).
+        # At push time via the standard review flow, chunks are already in Tachyon.
         logger.info(
-            "TachyonVectorStore: would upload %d chunks to %s (stub — implement when Tachyon API is finalised)",
-            len(chunks), self._endpoint or "(no endpoint set)",
+            "TachyonVectorStore.upsert_chunks: %d chunks — ingestion handled by S3/vectorize flow (ingestion plan).",
+            len(chunks),
         )
-        # TODO: POST {endpoint}/upload with raw chunk content once Tachyon API is ready
-        # Example payload:
-        # {
-        #   "collection": self._collection,
-        #   "documents": [{"id": c.chunk_id, "content": c.content, "metadata": c.to_dict()} for c in chunks]
-        # }
 
     def delete_chunks(self, chunk_ids: list[str]) -> None:
-        logger.info("TachyonVectorStore.delete_chunks: stub — not implemented yet.")
+        # Full implementation requires s3_file_id + vector_file_id from kb_documents.
+        # Wired in the ingestion plan once file IDs are tracked in MongoDB.
+        logger.info(
+            "TachyonVectorStore.delete_chunks: %d ids — requires file ID lookup (ingestion plan).",
+            len(chunk_ids),
+        )
 
     def search(
         self,
@@ -269,9 +298,17 @@ class TachyonVectorStore(VectorStoreClient):
         usecase_id: str | None = None,
         agent_filter: str | None = None,
         source_type: str | None = None,
+        query_text: str | None = None,
     ) -> list[dict[str, Any]]:
-        logger.info("TachyonVectorStore.search: stub — not implemented yet.")
-        return []
+        if not query_text:
+            logger.warning("TachyonVectorStore.search called without query_text; returning empty.")
+            return []
+        return self._client.search(
+            query=query_text,
+            top_k=top_k,
+            usecase_id=usecase_id or self._usecase_id,
+            collection=self._collection,
+        )
 
 
 # ---------------------------------------------------------------------------

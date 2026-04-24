@@ -40,10 +40,22 @@ vector_stores:
   #   api_key: ${VS_API_KEY}
   #   collection: my_collection
 
-  # ── Example: Tachyon (internal GenAI service) ─────────────────────────────────
+  # ── Tachyon (internal GenAI service) ─────────────────────────────────────────
+  # Tachyon handles its own vectorization. Auth uses Apigee OAuth + mTLS certs.
+  # Add one entry per Tachyon endpoint / usecase. All secrets go in .env.
+  #
   # - id: tachyon-prod
   #   name: Tachyon Production
   #   type: tachyon
-  #   endpoint: ${TACHYON_ENDPOINT}
-  #   api_key: ${TACHYON_API_KEY}
-  #   collection: ${TACHYON_COLLECTION}
+  #   collection: my-corpus-name        # Tachyon corpus / collection identifier
+  #   extra:
+  #     consumer_key:    ${TACHYON_CONSUMER_KEY}
+  #     consumer_secret: ${TACHYON_CONSUMER_SECRET}
+  #     api_key:         ${TACHYON_API_KEY}
+  #     usecase_id:      ${TACHYON_USECASE_ID}
+  #     apigee_url:      ${TACHYON_APIGEE_URL}
+  #     search_url:      ${TACHYON_SEARCH_URL}
+  #     completion_url:  ${TACHYON_COMPLETION_URL}
+  #     cert_path:       ${TACHYON_CERT_PATH}     # path to client .crt file
+  #     key_path:        ${TACHYON_KEY_PATH}      # path to client .key file
+  #     ca_bundle:       ${TACHYON_CA_BUNDLE}     # path to CA bundle / root cert
