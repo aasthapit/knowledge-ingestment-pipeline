@@ -7,7 +7,7 @@ Classes:
   KBLedger              — permanent pushed-doc record with drift detection
   UsecaseLedger         — per-usecase/agent chunk inventory + Confluence sources
   CorpusStore           — named corpora (collections of KBs with usecase context)
-  KnowledgeBaseStore    — named knowledge bases (Confluence or JSONL sources)
+  KnowledgeBaseStore    — named knowledge bases (Confluence, JSONL, or web-crawler sources)
   VectorStoreConfigStore— registered vector DB targets (Redis or custom)
 """
 from __future__ import annotations
@@ -1318,13 +1318,19 @@ def get_corpus_store() -> CorpusStore:
 
 
 # ---------------------------------------------------------------------------
-# KnowledgeBaseStore — named source entities (Confluence URLs or JSONL files)
+# KnowledgeBaseStore — named source entities
 # ---------------------------------------------------------------------------
 
 class KnowledgeBaseStore:
     """
-    Manages Knowledge Base entities — the atomic source units that hold either
-    a set of Confluence URLs to crawl or a JSONL file to import.
+    Manages Knowledge Base entities — the atomic source units that feed a corpus.
+
+    Three source types:
+        "confluence" — one or more parent page URLs; the built-in crawler fetches the tree.
+        "jsonl"      — a manually uploaded .jsonl file.
+        "web"        — output from an external web crawler delivered as JSONL.
+                       The pipeline does not crawl; the user runs their own crawler
+                       and imports the resulting JSONL via the Add Document page.
 
     KBs carry no usecase/agent context; that is added at the corpus level.
 
@@ -1353,8 +1359,8 @@ class KnowledgeBaseStore:
         file_ref: str | None = None,
     ) -> str:
         """Create a new KB and return its kb_id."""
-        if source_type not in ("confluence", "jsonl"):
-            raise ValueError(f"source_type must be 'confluence' or 'jsonl', got {source_type!r}")
+        if source_type not in ("confluence", "jsonl", "web"):
+            raise ValueError(f"source_type must be 'confluence', 'jsonl', or 'web', got {source_type!r}")
         now = datetime.now(timezone.utc)
         kb_id = str(uuid.uuid4())
         self._coll.insert_one({

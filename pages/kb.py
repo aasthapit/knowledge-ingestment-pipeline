@@ -1,12 +1,12 @@
-"""Knowledge Bases — named document sources (Confluence or JSONL)."""
+"""Knowledge Bases — named document sources (Confluence, JSONL, or web crawler)."""
 from __future__ import annotations
 
 import streamlit as st
 
 st.title("📂 Knowledge Bases")
 st.caption(
-    "A Knowledge Base is a named source of documents — either a set of Confluence pages "
-    "to crawl, or a JSONL file upload. KBs are shared across corpora; one KB can feed many corpora."
+    "A Knowledge Base is a named source of documents — a Confluence page tree, a JSONL file upload, "
+    "or the output of an external web crawler. KBs are shared across corpora; one KB can feed many corpora."
 )
 
 # ── Data loaders ──────────────────────────────────────────────────────────────
@@ -41,7 +41,7 @@ def _fmt_date(iso: str | None) -> str:
 
 
 STATUS_COLOR = {"empty": "gray", "staging": "orange", "ready": "green"}
-SOURCE_ICON  = {"confluence": "🔗", "jsonl": "📦"}
+SOURCE_ICON  = {"confluence": "🔗", "jsonl": "📦", "web": "🌐"}
 
 # ── Connection guard ──────────────────────────────────────────────────────────
 
@@ -83,7 +83,7 @@ with left:
             new_desc = st.text_area("Description", height=60)
             new_type = st.radio(
                 "Source type",
-                ["confluence", "jsonl"],
+                ["confluence", "jsonl", "web"],
                 horizontal=True,
                 key="create_kb_type",
             )
@@ -98,6 +98,20 @@ with left:
                 new_cron  = st.text_input(
                     "Refresh schedule (cron expression, optional)",
                     placeholder="0 2 * * 1  (every Monday at 2 AM)",
+                )
+            elif new_type == "web":
+                new_urls = st.text_area(
+                    "Seed URLs  *(optional, for reference)*",
+                    placeholder="https://docs.example.com/",
+                    height=60,
+                    help="These are stored for reference only — run your external web crawler and import the resulting JSONL via Add Document.",
+                )
+                new_depth = -1
+                new_cron  = ""
+                st.info(
+                    "🌐 **Web KB** — run your own web crawler against these URLs, "
+                    "export the results as JSONL, then import it on the **Add Document** page "
+                    "and select this KB. Supported URL field names: `page_url`, `sourceURL`, `source_url`, `url`."
                 )
             else:
                 new_urls  = ""
@@ -136,11 +150,11 @@ with left:
     # ── Type filter ───────────────────────────────────────────────────────────
     type_filter = st.segmented_control(
         "Filter",
-        ["All", "Confluence", "JSONL"],
+        ["All", "Confluence", "JSONL", "Web"],
         default="All",
         label_visibility="collapsed",
     )
-    filter_map = {"All": None, "Confluence": "confluence", "JSONL": "jsonl"}
+    filter_map = {"All": None, "Confluence": "confluence", "JSONL": "jsonl", "Web": "web"}
     try:
         filtered_kbs = _load_kbs(source_type=filter_map.get(type_filter or "All"))
     except Exception:
@@ -244,6 +258,18 @@ with right:
                 st.divider()
                 st.markdown(
                     "To crawl this KB, go to the **Confluence** page and select it as the target."
+                )
+
+            # ── Web crawler details ───────────────────────────────────────────
+            elif source_type == "web":
+                if kb.get("confluence_urls"):  # stored as seed URLs for reference
+                    st.markdown("**Seed URLs**")
+                    for url in kb.get("confluence_urls") or []:
+                        st.code(url, language=None)
+                st.info(
+                    "🌐 Run your external web crawler against the seed URLs above and import "
+                    "the resulting JSONL on the **Add Document** page. "
+                    "Supported URL fields: `page_url`, `sourceURL`, `source_url`, `url`."
                 )
 
             # ── JSONL details ─────────────────────────────────────────────────

@@ -5,9 +5,11 @@ Imports pre-existing JSONL chunk files into the pipeline staging area.
 Two built-in schemas are auto-detected:
 
   "crawler"
-      Produced by crawl_ocp_docs.py.
-      Key fields: text, page_url, page_name, section_breadcrumbs (list),
-                  section_heading, chunk_id, agent_filter, usecase_id.
+      Generic web-crawler output.
+      Detection trigger: record contains "text" AND one of
+        "page_url", "sourceURL", or "source_url".
+      Key fields: text, page_url (or sourceURL / source_url), page_name,
+                  section_breadcrumbs (list), section_heading, chunk_id.
 
   "pipeline"
       Produced by pipeline/exporter.py.
@@ -175,7 +177,8 @@ def detect_schema(record: dict) -> str:
     custom = _detect_custom(record)
     if custom:
         return custom
-    if "text" in record and "page_url" in record:
+    _url_fields = ("page_url", "sourceURL", "source_url")
+    if "text" in record and any(k in record for k in _url_fields):
         return "crawler"
     if "content" in record and "source" in record:
         return "pipeline"
@@ -220,6 +223,12 @@ def map_record(
         return _map_custom(rec, schema, extra_tags)
 
     if schema == "crawler":
+        url = (
+            rec.get("page_url")
+            or rec.get("sourceURL")
+            or rec.get("source_url")
+            or rec.get("source_file", "")
+        )
         tags = [
             t for t in [
                 rec.get("agent_filter", ""),
@@ -230,17 +239,17 @@ def map_record(
         ]
         chunk = Chunk(
             chunk_id=rec.get("chunk_id") or rec.get("id") or str(uuid.uuid4()),
-            source=rec.get("page_url") or rec.get("source_file", ""),
+            source=url,
             title=rec.get("page_name", ""),
             section=_section_from_crawler(rec),
             content=rec.get("text", ""),
-            tags=list(dict.fromkeys(tags)),   # deduplicate, preserve order
+            tags=list(dict.fromkeys(tags)),
             metadata={
                 "citation": {
-                    "source_path": rec.get("page_url", ""),
+                    "source_path": url,
                     "source_type": "url",
                     "title": rec.get("page_name", ""),
-                    "url": rec.get("page_url"),
+                    "url": url,
                     "char_count": rec.get("char_count"),
                     "word_count": rec.get("word_count"),
                 }
@@ -273,7 +282,13 @@ def map_record(
         )
         chunk = Chunk(
             chunk_id=rec.get("chunk_id") or rec.get("id") or str(uuid.uuid4()),
-            source=rec.get("url") or rec.get("source") or rec.get("source_path", ""),
+            source=(
+                rec.get("url")
+                or rec.get("sourceURL")
+                or rec.get("source_url")
+                or rec.get("source")
+                or rec.get("source_path", "")
+            ),
             title=rec.get("title") or rec.get("page_name", ""),
             section=rec.get("section") or rec.get("section_heading", ""),
             content=text,
@@ -342,7 +357,13 @@ def peek_jsonl(
             rec = json.loads(line)
             samples_raw.append(rec)
             all_keys.update(rec.keys())
-            src = rec.get("page_url") or rec.get("source") or rec.get("url", "")
+            src = (
+                rec.get("page_url")
+                or rec.get("sourceURL")
+                or rec.get("source_url")
+                or rec.get("source")
+                or rec.get("url", "")
+            )
             if src:
                 sources_seen.add(src)
         except json.JSONDecodeError:
@@ -576,7 +597,14 @@ def import_jsonl(
         if not chunk.content.strip():
             continue
 
-        src = rec.get("page_url") or rec.get("source") or rec.get("url", "") or chunk.source
+        src = (
+            rec.get("page_url")
+            or rec.get("sourceURL")
+            or rec.get("source_url")
+            or rec.get("source")
+            or rec.get("url", "")
+            or chunk.source
+        )
         if src:
             unique_sources.add(src)
 

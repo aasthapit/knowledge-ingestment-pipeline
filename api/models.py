@@ -37,7 +37,7 @@ class StatusResponse(BaseModel):
 
 class CreateKBRequest(BaseModel):
     name: str
-    source_type: str                      # "confluence" or "jsonl"
+    source_type: str                      # "confluence" | "jsonl" | "web"
     description: str = ""
     confluence_urls: list[str] = []
     max_depth: int = -1

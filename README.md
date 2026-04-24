@@ -73,10 +73,11 @@ This pipeline adds structure around that process:
 
 ### Knowledge Base
 
-A named source of documents. Two types:
+A named source of documents. Three types:
 
-- **Confluence** — one or more parent page URLs; the crawler fetches the full page tree
+- **Confluence** — one or more parent page URLs; the built-in crawler fetches the full page tree
 - **JSONL** — a manually uploaded `.jsonl` file
+- **Web** — output from an external web crawler delivered as JSONL; the pipeline does not crawl, you bring the data
 
 A Knowledge Base has no use case or agent context — it is purely a source container. One KB can belong to many corpora.
 
@@ -277,6 +278,17 @@ Create and manage knowledge bases — the sources that feed your corpora.
 **Confluence KB** — provide one or more parent page URLs and set a crawl depth. The KB records the connection so it can be refreshed on a schedule.
 
 **JSONL KB** — upload a `.jsonl` file (one JSON object per line). The importer auto-detects the data format and shows a preview before importing. Custom field mappings let you import from any source without changing your data.
+
+**Web KB** — for content produced by any external web crawler. The pipeline does not crawl; you run your own crawler, export the results as JSONL, and import that file on the **Add Document** page pointing at this KB. The following URL field names are recognised automatically (no mapping required):
+
+| Field name | Notes |
+|---|---|
+| `page_url` | Standard crawler output field |
+| `sourceURL` | Common in many third-party crawlers |
+| `source_url` | Underscore variant |
+| `url` | Generic fallback |
+
+Text content should be in a `text` or `content` field. If your crawler uses different field names, use the **Field mapper** on the import page or save a named schema in `schemas.yaml`.
 
 ---
 
